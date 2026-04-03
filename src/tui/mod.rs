@@ -14,6 +14,8 @@ use std::path::PathBuf;
 use std::time::{Duration, Instant};
 use tokio::sync::mpsc;
 
+use crossterm::event::KeyEventKind;
+
 use crate::config::Config;
 use crate::discovery::PeerRegistry;
 use crate::server::ServerEvent;
@@ -22,7 +24,7 @@ use crate::shares::ShareRegistry;
 use app::{App, AppEvent};
 
 /// How long we wait after the last keystroke before deciding a burst is a dropped path.
-const PATH_DEBOUNCE_MS: u64 = 150;
+const PATH_DEBOUNCE_MS: u64 = 30;
 
 fn deduplicate_path(s: &str) -> String {
     // Windows Terminal drag-and-drop duplicates every character: "CC:\\UUsseerrss\\"
@@ -151,6 +153,10 @@ pub async fn run(
             Some(Ok(event)) = crossterm_events.next() => {
                 match event {
                     Event::Key(key) => {
+                        // Only process real key presses (fixes Windows duplication)
+                        if key.kind != KeyEventKind::Press {
+                            continue;
+                        }
                         // Global quit (but not while accumulating a path)
                         if !accumulating {
                             if key.code == KeyCode::Char('q')
