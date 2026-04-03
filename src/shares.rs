@@ -86,12 +86,18 @@ impl ShareRegistry {
         }
     }
 
-    pub fn add(&self, path: PathBuf, download_limit: Option<u32>, expires_in_mins: Option<u64>) -> Result<SharedItem> {
+    pub fn add(
+        &self,
+        path: PathBuf,
+        download_limit: Option<u32>,
+        expires_in_mins: Option<u64>,
+        on_zipping: impl FnOnce(&str) + Send + 'static,
+    ) -> Result<SharedItem> {
         let path = path.canonicalize()?;
         let item = if path.is_file() {
             self.add_file(path, download_limit, expires_in_mins)?
         } else if path.is_dir() {
-            self.add_folder(path, download_limit, expires_in_mins)?
+            self.add_folder(path, download_limit, expires_in_mins, on_zipping)?
         } else {
             anyhow::bail!("Path is neither a file nor a directory: {:?}", path);
         };
@@ -121,7 +127,7 @@ impl ShareRegistry {
         })
     }
 
-    fn add_folder(&self, path: PathBuf, download_limit: Option<u32>, expires_in_mins: Option<u64>) -> Result<SharedItem> {
+    fn add_folder(&self, path: PathBuf, download_limit: Option<u32>, expires_in_mins: Option<u64>, on_zipping: impl FnOnce(&str)) -> Result<SharedItem> {
         let name = path.file_name().unwrap().to_string_lossy().to_string();
         let expires_at = expires_in_mins.map(|m| Utc::now() + chrono::Duration::minutes(m as i64));
 
@@ -130,6 +136,7 @@ impl ShareRegistry {
         let should_zip = file_count > 20 || max_depth > 5;
 
         let (final_path, kind, size, checksum) = if should_zip {
+            on_zipping(&name);
             let zip_path = self.zip_cache_dir.join(format!("{}.zip", name));
             zip_folder(&path, &zip_path)?;
             let size = fs::metadata(&zip_path)?.len();

@@ -53,22 +53,26 @@ fn try_share_path(
 ) {
     let cleaned = deduplicate_path(raw.trim().trim_matches('"').trim_matches('\''));
     let path = PathBuf::from(&cleaned);
-    if path.exists() {
-        let etx = event_tx.clone();
-        let shares_c = shares.clone();
-        tokio::spawn(async move {
-            match shares_c.add(path, None, None) {
+    let etx = event_tx.clone();
+    let shares_c = shares.clone();
+    tokio::spawn(async move {
+        if path.exists() {
+            let etx2 = etx.clone();
+            let name = path.file_name().unwrap_or_default().to_string_lossy().to_string();
+            match shares_c.add(path, None, None, move |folder_name| {
+                let msg = format!("Zipping '{}' — this may take a moment…", folder_name);
+                let etx2 = etx2.clone();
+                tokio::spawn(async move {
+                    let _ = etx2.send(AppEvent::ZipStarted(msg)).await;
+                });
+            }) {
                 Ok(item) => { etx.send(AppEvent::ShareAdded(item)).await.ok(); }
                 Err(e) => { etx.send(AppEvent::ShareError(e.to_string())).await.ok(); }
             }
-        });
-    } else {
-        let etx = event_tx.clone();
-        let msg = format!("Path not found: {}", cleaned);
-        tokio::spawn(async move {
-            etx.send(AppEvent::ShareError(msg)).await.ok();
-        });
-    }
+        } else {
+            etx.send(AppEvent::ShareError(format!("Path not found: {}", cleaned))).await.ok();
+        }
+    });
 }
 
 pub async fn run(

@@ -173,8 +173,9 @@ async fn run_send(
 
     let cache_dir = config.download_dir.parent().unwrap_or(&config.download_dir).join(".fileshare_zip_cache");
     let shares = ShareRegistry::new(cache_dir);
-    let item = shares.add(path, limit, expires)?;
-
+    let item = shares.add(path, limit, expires, |name| {
+            println!("Zipping '{}' — this may take a moment…", name);
+        })?;
     println!(
         "Sharing '{}' ({}) — ID: {}",
         item.name,

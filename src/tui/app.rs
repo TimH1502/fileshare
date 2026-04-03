@@ -50,6 +50,7 @@ pub enum AppEvent {
     AddShare(PathBuf),
     ShareAdded(crate::shares::SharedItem),
     ShareError(String),
+    ZipStarted(String),
 }
 
 pub struct App {
@@ -376,6 +377,9 @@ impl App {
                     format!("+ Sharing '{}' ({})", item.name, item.size_human()),
                     LogKind::Success,
                 );
+            }
+            AppEvent::ZipStarted(msg) => {
+                self.log(msg, LogKind::Info);
             }
             AppEvent::ShareError(e) => {
                 self.log(format!("✗ Share failed: {}", e), LogKind::Warning);
