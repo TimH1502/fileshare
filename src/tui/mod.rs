@@ -118,14 +118,24 @@ pub async fn run(
     loop {
         // Check if the debounce timer has expired — flush pending path buffer
         if let Some(t) = last_key_time {
-            if t.elapsed() >= Duration::from_millis(PATH_DEBOUNCE_MS) && !path_buf.is_empty() {
-                let raw = path_buf.clone();
-                path_buf.clear();
-                last_key_time = None;
-                accumulating = false;
+        if t.elapsed() >= Duration::from_millis(PATH_DEBOUNCE_MS) && !path_buf.is_empty() {
+            let raw = path_buf.clone();
+            path_buf.clear();
+            last_key_time = None;
+            accumulating = false;
+
+            // NEW LOGIC HERE
+            let deduped = deduplicate_path(&raw);
+            if looks_like_path(&deduped) {
                 try_share_path(&raw, &shares, &event_tx);
+            } else if raw.len() == 1 {
+                // Treat as normal key input
+                let c = raw.chars().next().unwrap();
+                app.handle_key(crossterm::event::KeyEvent::from(KeyCode::Char(c)));
             }
+            // else: discard or handle as needed
         }
+    }
 
         terminal.draw(|f| ui::draw(f, &app))?;
 
@@ -157,7 +167,7 @@ pub async fn run(
                                 // A path burst starts with '/' (Unix) or a drive letter followed quickly
                                 // by more chars. We detect by: if path_buf is non-empty we're already
                                 // accumulating; or if the char could start a path (drive letter or slash).
-                                let could_start_path = c == '/' || c == '\\' || c.is_ascii_alphabetic();
+                                let could_start_path = c == '/' || c == '\\'; // remove alphabetic entirely
 
                                 if accumulating || (!path_buf.is_empty()) {
                                     // Continue accumulating
