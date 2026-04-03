@@ -115,10 +115,10 @@ impl PeerRegistry {
 
 fn make_multicast_socket() -> Result<Socket> {
     let socket = Socket::new(Domain::IPV4, Type::DGRAM, Some(Protocol::UDP))?;
-    // set_reuse_address exists on all platforms
-    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    // set_reuse_port is needed on Linux and macOS to allow multiple binds to the same port.
+    #[cfg(any(target_os = "windows"))]
     socket.set_reuse_port(true)?;
-    // set_reuse_port is the correct call on Linux and macOS; does not exist on Windows
+    // It does not exist on unix.
     #[cfg(any(target_os = "linux", target_os = "macos"))]
     socket.set_reuse_address(true)?;
     socket.set_nonblocking(true)?;
