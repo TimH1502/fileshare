@@ -1,0 +1,36 @@
+[package]
+name = "fileshare"
+version = "0.1.0"
+edition = "2021"
+description = "A local network file sharing CLI tool"
+
+[[bin]]
+name = "fileshare"
+path = "src/main.rs"
+
+[dependencies]
+tokio = { version = "1", features = ["full"] }
+axum = { version = "0.7", features = ["multipart"] }
+reqwest = { version = "0.12", features = ["stream", "json"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+toml = "0.8"
+clap = { version = "4", features = ["derive"] }
+ratatui = "0.26"
+crossterm = { version = "0.27", features = ["event-stream"] }
+indicatif = "0.17"
+sha2 = "0.10"
+hex = "0.4"
+uuid = { version = "1", features = ["v4"] }
+chrono = { version = "0.4", features = ["serde"] }
+walkdir = "2"
+zip = "0.6"
+tower-http = { version = "0.5", features = ["fs", "cors"] }
+tokio-util = { version = "0.7", features = ["io"] }
+futures = "0.3"
+dirs = "5"
+anyhow = "1"
+socket2 = "0.5"
+bytes = "1"
+axum-extra = { version = "0.9", features = ["typed-header"] }
+mime_guess = "2"
