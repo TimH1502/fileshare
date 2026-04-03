@@ -11,7 +11,8 @@ use tokio::net::UdpSocket;
 const MULTICAST_ADDR: Ipv4Addr = Ipv4Addr::new(239, 255, 42, 99);
 const MULTICAST_PORT: u16 = 7778;
 const ANNOUNCE_INTERVAL_SECS: u64 = 3;
-const PEER_TIMEOUT_SECS: i64 = 10;
+// A peer is stale if we haven't heard from it in 5x the announce interval
+const PEER_TIMEOUT_SECS: i64 = 15;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Announcement {
@@ -27,6 +28,7 @@ pub struct Peer {
     pub port: u16,
     pub share_count: usize,
     pub last_seen: DateTime<Utc>,
+    pub manual: bool, // manually added peers are never pruned
 }
 
 impl Peer {
@@ -35,6 +37,9 @@ impl Peer {
     }
 
     pub fn is_stale(&self) -> bool {
+        if self.manual {
+            return false; // manually added peers stay until the app exits
+        }
         let age = Utc::now()
             .signed_duration_since(self.last_seen)
             .num_seconds();
@@ -57,6 +62,8 @@ impl PeerRegistry {
     pub fn upsert(&self, addr: IpAddr, ann: Announcement) {
         let key = format!("{}:{}", addr, ann.port);
         let mut peers = self.inner.write().unwrap();
+        // Preserve manual=true if it was manually added — now we also know its real username
+        let was_manual = peers.get(&key).map(|p| p.manual).unwrap_or(false);
         peers.insert(
             key,
             Peer {
@@ -65,6 +72,7 @@ impl PeerRegistry {
                 port: ann.port,
                 share_count: ann.share_count,
                 last_seen: Utc::now(),
+                manual: was_manual,
             },
         );
     }
@@ -92,21 +100,27 @@ impl PeerRegistry {
                 port,
                 share_count: 0,
                 last_seen: Utc::now(),
+                manual: true,
             },
         );
+    }
+
+    /// Remove a manually-added peer by key (used if user wants to forget it)
+    pub fn remove_manual(&self, addr: IpAddr, port: u16) {
+        let key = format!("{}:{}", addr, port);
+        let mut peers = self.inner.write().unwrap();
+        peers.remove(&key);
     }
 }
 
 fn make_multicast_socket() -> Result<Socket> {
     let socket = Socket::new(Domain::IPV4, Type::DGRAM, Some(Protocol::UDP))?;
-    // set_reuse_port is needed on Linux and macOS to allow multiple binds to the same port.
-    #[cfg(any(target_os = "windows"))]
+    // set_reuse_address exists on all platforms
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
     socket.set_reuse_port(true)?;
-    // It does not exist on unix.
+    // set_reuse_port is the correct call on Linux and macOS; does not exist on Windows
     #[cfg(any(target_os = "linux", target_os = "macos"))]
     socket.set_reuse_address(true)?;
-    #[cfg(unix)]
-    socket.set_reuse_port(true)?;
     socket.set_nonblocking(true)?;
     socket.bind(&SocketAddrV4::new(Ipv4Addr::UNSPECIFIED, MULTICAST_PORT).into())?;
     socket.join_multicast_v4(&MULTICAST_ADDR, &Ipv4Addr::UNSPECIFIED)?;
