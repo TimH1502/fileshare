@@ -53,6 +53,7 @@ jobs:
         run: cargo install cross
 
       - name: Build
+        shell: bash
         run: |
           if [ "${{ matrix.target }}" = "armv7-unknown-linux-gnueabihf" ]; then
             cross build --release --target ${{ matrix.target }}
