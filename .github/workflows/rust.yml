@@ -48,15 +48,17 @@ jobs:
       - name: Add target
         run: rustup target add ${{ matrix.target }}
 
-      # Needed for ARM cross-compilation
-      - name: Install cross-compilation tools (Linux ARM only)
+      - name: Install cross
         if: matrix.target == 'armv7-unknown-linux-gnueabihf'
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y gcc-arm-linux-gnueabihf
+        run: cargo install cross
 
       - name: Build
-        run: cargo build --release --target ${{ matrix.target }}
+        run: |
+          if [ "${{ matrix.target }}" = "armv7-unknown-linux-gnueabihf" ]; then
+            cross build --release --target ${{ matrix.target }}
+          else
+            cargo build --release --target ${{ matrix.target }}
+          fi
 
       - name: Collect binary
         run: |
