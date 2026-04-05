@@ -8,6 +8,9 @@ description = "A local network file sharing CLI tool"
 name = "fileshare"
 path = "src/main.rs"
 
+default-features = false
+features = ["rustls-tls"]
+
 [dependencies]
 tokio = { version = "1", features = ["full"] }
 axum = { version = "0.7", features = ["multipart"] }
