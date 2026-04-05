@@ -9,25 +9,38 @@ permissions:
 
 jobs:
   build:
-    name: Build for ${{ matrix.target }}
+    name: ${{ matrix.name }}
     runs-on: ${{ matrix.os }}
 
     strategy:
       matrix:
         include:
-          - os: ubuntu-latest
+          # Linux x64
+          - name: linux-x86_64
+            os: ubuntu-latest
             target: x86_64-unknown-linux-gnu
             binary_name: fileshare
-          - os: windows-latest
+
+          # Windows x64
+          - name: windows-x86_64
+            os: windows-latest
             target: x86_64-pc-windows-msvc
             binary_name: fileshare.exe
-          - os: macos-latest
-            target: x86_64-apple-darwin
+
+          # macOS ARM (Apple Silicon)
+          - name: macos-aarch64
+            os: macos-latest
+            target: aarch64-apple-darwin
+            binary_name: fileshare
+
+          # Raspberry Pi (ARMv7)
+          - name: linux-armv7
+            os: ubuntu-latest
+            target: armv7-unknown-linux-gnueabihf
             binary_name: fileshare
 
     steps:
-      - name: Checkout repo
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
@@ -35,15 +48,27 @@ jobs:
       - name: Add target
         run: rustup target add ${{ matrix.target }}
 
+      # Needed for ARM cross-compilation
+      - name: Install cross-compilation tools (Linux ARM only)
+        if: matrix.target == 'armv7-unknown-linux-gnueabihf'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gcc-arm-linux-gnueabihf
+
       - name: Build
         run: cargo build --release --target ${{ matrix.target }}
 
-      - name: Prepare binary
+      - name: Collect binary
         run: |
           mkdir dist
           cp target/${{ matrix.target }}/release/${{ matrix.binary_name }} dist/
 
-      - name: Upload to GitHub Release
+      - name: Archive
+        run: |
+          cd dist
+          tar -czf ${{ matrix.name }}.tar.gz ${{ matrix.binary_name }}
+
+      - name: Upload to release
         uses: softprops/action-gh-release@v2
         with:
-          files: dist/${{ matrix.binary_name }}
+          files: dist/*.tar.gz
