@@ -144,8 +144,15 @@ pub async fn run_mdns(
                         let new_port = info.get_port();
                         let resolved_host = info.get_hostname();
 
-                        // ✅ FILTER YOURSELF HERE
+                        // FILTER YOURSELF HERE
                         if new_port == port && resolved_host == hostname {
+                            continue;
+                        }
+
+                        let props = info.get_properties();
+
+                        // FILTER foreign services
+                        if props.get("app").map(|p| p.val_str()) != Some("local_fileshare") { // shouldnt be hardcoded, better use git hash etc.
                             continue;
                         }
 
@@ -233,6 +240,10 @@ fn build_props(username: &str, share_count: usize) -> HashMap<String, String> {
     let mut m = HashMap::new();
     m.insert("username".to_owned(), username.to_owned());
     m.insert("share_count".to_owned(), share_count.to_string());
+
+    m.insert("app".to_owned(), "local_fileshare".to_owned());
+    m.insert("version".to_owned(), "1".to_owned()); // shouldnt be hardcoded, better use git hash etc.
+    
     m
 }
 
