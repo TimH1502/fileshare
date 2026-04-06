@@ -135,27 +135,20 @@ async fn run_tui(username_override: Option<String>, port_override: Option<u16>) 
         axum::serve(listener, router).await.ok();
     });
 
-    // Start UDP discovery announcer
+    // ✅ Start mDNS (single task owning everything)
     {
         let username = config.username.clone();
         let port = config.port;
         let shares_clone = shares.clone();
+        let peers_clone = peers.clone();
+
         tokio::spawn(async move {
-            discovery::run_announcer(username, port, shares_clone)
+            discovery::run_mdns(username, port, shares_clone, peers_clone)
                 .await
                 .ok();
         });
     }
-
-    // Start UDP discovery listener
-    {
-        let peers_clone = peers.clone();
-        let port = config.port;
-        tokio::spawn(async move {
-            discovery::run_listener(peers_clone, port).await.ok();
-        });
-    }
-
+    
     // Run TUI
     tui::run(config, peers, shares, event_rx).await?;
 

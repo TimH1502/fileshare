@@ -1,25 +1,20 @@
 use anyhow::Result;
 use chrono::{DateTime, Utc};
-use serde::{Deserialize, Serialize};
-use socket2::{Domain, Protocol, Socket, Type};
+use mdns_sd::{ServiceDaemon, ServiceEvent, ServiceInfo};
 use std::collections::HashMap;
-use std::net::{IpAddr, Ipv4Addr, SocketAddr, SocketAddrV4};
+use std::net::IpAddr;
 use std::sync::{Arc, RwLock};
 use std::time::Duration;
-use tokio::net::UdpSocket;
 
-const MULTICAST_ADDR: Ipv4Addr = Ipv4Addr::new(239, 255, 42, 99);
-const MULTICAST_PORT: u16 = 7778;
-const ANNOUNCE_INTERVAL_SECS: u64 = 3;
-// A peer is stale if we haven't heard from it in 5x the announce interval
+// ---------------------------------------------------------------------------
+
+const SERVICE_TYPE: &str = "_fileshare._tcp.local.";
 const PEER_TIMEOUT_SECS: i64 = 15;
+const ANNOUNCE_INTERVAL_SECS: u64 = 3;
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct Announcement {
-    pub username: String,
-    pub port: u16,
-    pub share_count: usize,
-}
+// ---------------------------------------------------------------------------
+// Peer
+// ---------------------------------------------------------------------------
 
 #[derive(Debug, Clone)]
 pub struct Peer {
@@ -28,7 +23,7 @@ pub struct Peer {
     pub port: u16,
     pub share_count: usize,
     pub last_seen: DateTime<Utc>,
-    pub manual: bool, // manually added peers are never pruned
+    pub manual: bool,
 }
 
 impl Peer {
@@ -38,7 +33,7 @@ impl Peer {
 
     pub fn is_stale(&self) -> bool {
         if self.manual {
-            return false; // manually added peers stay until the app exits
+            return false;
         }
         let age = Utc::now()
             .signed_duration_since(self.last_seen)
@@ -46,6 +41,10 @@ impl Peer {
         age > PEER_TIMEOUT_SECS
     }
 }
+
+// ---------------------------------------------------------------------------
+// PeerRegistry
+// ---------------------------------------------------------------------------
 
 #[derive(Clone)]
 pub struct PeerRegistry {
@@ -59,29 +58,23 @@ impl PeerRegistry {
         }
     }
 
-    pub fn upsert(&self, addr: IpAddr, ann: Announcement) {
-        let key = format!("{}:{}", addr, ann.port);
+    pub fn upsert(&self, addr: IpAddr, port: u16, username: String, share_count: usize) {
+        let key = format!("{}:{}", addr, port);
         let mut peers = self.inner.write().unwrap();
-        // Preserve manual=true if it was manually added — now we also know its real username
+
         let was_manual = peers.get(&key).map(|p| p.manual).unwrap_or(false);
+
         peers.insert(
             key,
             Peer {
-                username: ann.username,
+                username,
                 addr,
-                port: ann.port,
-                share_count: ann.share_count,
+                port,
+                share_count,
                 last_seen: Utc::now(),
                 manual: was_manual,
             },
         );
-    }
-
-    pub fn list(&self) -> Vec<Peer> {
-        let peers = self.inner.read().unwrap();
-        let mut v: Vec<_> = peers.values().cloned().collect();
-        v.sort_by(|a, b| a.username.cmp(&b.username));
-        v
     }
 
     pub fn prune_stale(&self) {
@@ -89,7 +82,12 @@ impl PeerRegistry {
         peers.retain(|_, p| !p.is_stale());
     }
 
-    pub fn add_manual(&self, addr: IpAddr, port: u16) {
+    pub fn list(&self) -> Vec<Peer> {
+        let peers = self.inner.read().unwrap();
+        peers.values().cloned().collect()
+    }
+
+        pub fn add_manual(&self, addr: IpAddr, port: u16) {
         let key = format!("{}:{}", addr, port);
         let mut peers = self.inner.write().unwrap();
         peers.insert(
@@ -105,79 +103,151 @@ impl PeerRegistry {
         );
     }
 
-    /// Remove a manually-added peer by key (used if user wants to forget it)
     pub fn remove_manual(&self, addr: IpAddr, port: u16) {
         let key = format!("{}:{}", addr, port);
         let mut peers = self.inner.write().unwrap();
         peers.remove(&key);
     }
+
+
 }
 
-fn make_multicast_socket() -> Result<Socket> {
-    let socket = Socket::new(Domain::IPV4, Type::DGRAM, Some(Protocol::UDP))?;
-    socket.set_reuse_address(true)?;
-    socket.set_nonblocking(true)?;
-    socket.bind(&SocketAddrV4::new(Ipv4Addr::UNSPECIFIED, MULTICAST_PORT).into())?;
-    socket.join_multicast_v4(&MULTICAST_ADDR, &Ipv4Addr::UNSPECIFIED)?;
-    Ok(socket)
-}
+// ---------------------------------------------------------------------------
+// PUBLIC ENTRY POINT (THIS REPLACES BOTH run_announcer + run_listener)
+// ---------------------------------------------------------------------------
 
-pub async fn run_announcer(
+pub async fn run_mdns(
     username: String,
     port: u16,
     share_registry: crate::shares::ShareRegistry,
-) -> Result<()> {
-    let socket = UdpSocket::bind("0.0.0.0:0").await?;
-    socket.set_multicast_ttl_v4(4)?;
-    let dest = SocketAddr::new(IpAddr::V4(MULTICAST_ADDR), MULTICAST_PORT);
-
-    loop {
-        let share_count = share_registry.list_available().len();
-        let ann = Announcement {
-            username: username.clone(),
-            port,
-            share_count,
-        };
-        if let Ok(msg) = serde_json::to_vec(&ann) {
-            socket.send_to(&msg, dest).await.ok();
-        }
-        tokio::time::sleep(Duration::from_secs(ANNOUNCE_INTERVAL_SECS)).await;
-    }
-}
-
-pub async fn run_listener(
     peer_registry: PeerRegistry,
-    own_port: u16,
 ) -> Result<()> {
-    // Use socket2 to create a proper multicast socket, then convert to tokio
-    let std_socket = make_multicast_socket()?;
-    let std_udp: std::net::UdpSocket = std_socket.into();
-    let socket = UdpSocket::from_std(std_udp)?;
+    let daemon = ServiceDaemon::new()?;
 
-    let mut buf = vec![0u8; 4096];
+    let instance = sanitise_instance_name(&username);
+    let host = format!("{}.local.", gethostname());
 
-    // Spawn pruner
-    let registry_clone = peer_registry.clone();
-    tokio::spawn(async move {
-        loop {
-            tokio::time::sleep(Duration::from_secs(5)).await;
-            registry_clone.prune_stale();
-        }
-    });
+    // -----------------------------------------------------------------------
+    // LISTENER (runs on blocking thread)
+    // -----------------------------------------------------------------------
 
-    loop {
-        match socket.recv_from(&mut buf).await {
-            Ok((len, src)) => {
-                // Ignore our own announcements by port
-                if let Ok(ann) = serde_json::from_slice::<Announcement>(&buf[..len]) {
-                    if ann.port != own_port {
-                        peer_registry.upsert(src.ip(), ann);
+    let receiver = daemon.browse(SERVICE_TYPE)?;
+
+    {
+        let registry = peer_registry.clone();
+
+        let hostname = host.clone();
+        std::thread::spawn(move || {
+            for event in receiver {
+                match event {
+                    ServiceEvent::ServiceResolved(info) => {
+                        let new_port = info.get_port();
+                        let resolved_host = info.get_hostname();
+
+                        // ✅ FILTER YOURSELF HERE
+                        if new_port == port && resolved_host == hostname {
+                            continue;
+                        }
+
+                        let username = info
+                            .get_properties()
+                            .get("username")
+                            .map(|p| p.val_str().to_owned())
+                            .unwrap_or_else(|| info.get_fullname().to_owned());
+
+                        let share_count: usize = info
+                            .get_properties()
+                            .get("share_count")
+                            .and_then(|p| p.val_str().parse::<usize>().ok())
+                            .unwrap_or(0);
+
+                        if let Some(addr) = info
+                            .get_addresses_v4()
+                            .into_iter()
+                            .next()
+                            .map(|a| IpAddr::V4(*a))
+                        {
+                            registry.upsert(addr, new_port, username, share_count);
+                        }
                     }
+                    _ => {}
                 }
             }
-            Err(_) => {
-                tokio::time::sleep(Duration::from_millis(100)).await;
-            }
-        }
+        });
     }
+
+    // -----------------------------------------------------------------------
+    // STALE CLEANER
+    // -----------------------------------------------------------------------
+
+    {
+        let registry = peer_registry.clone();
+        tokio::spawn(async move {
+            loop {
+                tokio::time::sleep(Duration::from_secs(5)).await;
+                registry.prune_stale();
+            }
+        });
+    }
+
+    // -----------------------------------------------------------------------
+    // ANNOUNCER LOOP (ONLY PLACE THAT TOUCHES daemon.register!)
+    // -----------------------------------------------------------------------
+
+    let mut last_count = 0;
+
+    loop {
+        tokio::time::sleep(Duration::from_secs(ANNOUNCE_INTERVAL_SECS)).await;
+
+        let count = share_registry.list_available().len();
+
+        let fullname = format!("{}.{}", instance, SERVICE_TYPE);
+
+        // Always re-announce (refresh TTL)
+        daemon.unregister(&fullname).ok();
+
+        let props = build_props(&username, count);
+
+        let service = ServiceInfo::new(
+            SERVICE_TYPE,
+            &instance,
+            &host,
+            "",
+            port,
+            Some(props),
+        )?
+        .enable_addr_auto();
+
+        daemon.register(service)?;
+
+        last_count = count;
+    }
+    
+}
+
+// ---------------------------------------------------------------------------
+// Helpers
+// ---------------------------------------------------------------------------
+
+fn build_props(username: &str, share_count: usize) -> HashMap<String, String> {
+    let mut m = HashMap::new();
+    m.insert("username".to_owned(), username.to_owned());
+    m.insert("share_count".to_owned(), share_count.to_string());
+    m
+}
+
+fn sanitise_instance_name(name: &str) -> String {
+    let s: String = name
+        .chars()
+        .map(|c| if c.is_alphanumeric() || c == '-' { c } else { '_' })
+        .collect();
+
+    s[..s.len().min(63)].to_owned()
+}
+
+fn gethostname() -> String {
+    hostname::get()
+        .ok()
+        .and_then(|s| s.into_string().ok())
+        .unwrap_or_else(|| "localhost".to_owned())
 }
