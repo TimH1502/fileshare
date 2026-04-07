@@ -39,6 +39,16 @@ pub struct DownloadState {
     pub error: Option<String>,
 }
 
+/// Pending zip-confirmation request shown to the user.
+#[derive(Debug, Clone)]
+pub struct ZipConfirmRequest {
+    pub path: PathBuf,
+    pub folder_name: String,
+    pub file_count: usize,
+    pub total_size: u64,
+    pub would_zip: bool,  // whether it exceeds the auto-zip threshold
+}
+
 pub enum AppEvent {
     Tick,
     Key(crossterm::event::KeyEvent),
@@ -48,6 +58,10 @@ pub enum AppEvent {
     DownloadError(String),
     ServerEvent(ServerEvent),
     AddShare(PathBuf),
+    /// Folder dropped — needs user confirmation for zipping
+    ZipConfirmNeeded(ZipConfirmRequest),
+    /// User confirmed: share path, zip=true/false
+    ZipConfirmResult(PathBuf, bool),
     ShareAdded(crate::shares::SharedItem),
     ShareError(String),
     ZipStarted(String),
@@ -71,6 +85,9 @@ pub struct App {
     pub show_help: bool,
     pub manual_ip_input: Option<String>,
     pub status_message: Option<String>,
+
+    /// Pending zip confirmation dialog (shown when a folder is dropped)
+    pub zip_confirm: Option<ZipConfirmRequest>,
 
     pub event_tx: mpsc::Sender<AppEvent>,
 }
@@ -97,6 +114,7 @@ impl App {
             show_help: false,
             manual_ip_input: None,
             status_message: None,
+            zip_confirm: None,
             event_tx,
         }
     }
@@ -128,6 +146,33 @@ impl App {
 
     pub fn handle_key(&mut self, key: crossterm::event::KeyEvent) {
         use crossterm::event::KeyCode;
+
+        // Zip-confirm popup takes priority
+        if let Some(ref req) = self.zip_confirm.clone() {
+            match key.code {
+                KeyCode::Char('y') | KeyCode::Char('Y') => {
+                    let path = req.path.clone();
+                    self.zip_confirm = None;
+                    let tx = self.event_tx.clone();
+                    tokio::spawn(async move {
+                        tx.send(AppEvent::ZipConfirmResult(path, true)).await.ok();
+                    });
+                }
+                KeyCode::Char('n') | KeyCode::Char('N') => {
+                    let path = req.path.clone();
+                    self.zip_confirm = None;
+                    let tx = self.event_tx.clone();
+                    tokio::spawn(async move {
+                        tx.send(AppEvent::ZipConfirmResult(path, false)).await.ok();
+                    });
+                }
+                KeyCode::Esc => {
+                    self.zip_confirm = None;
+                }
+                _ => {}
+            }
+            return;
+        }
 
         // Manual IP input mode
         if let Some(ref mut input) = self.manual_ip_input {
@@ -197,6 +242,23 @@ impl App {
             KeyCode::Enter | KeyCode::Right => {
                 self.focus = Focus::PeerFiles;
                 self.load_peer_files();
+            }
+            KeyCode::Delete | KeyCode::Char('x') => {
+                if let Some(peer) = peers.into_iter().nth(self.peer_list_state) {
+                    if peer.manual {
+                        self.peers.remove_manual(peer.addr, peer.port);
+                        if self.peer_list_state > 0 {
+                            self.peer_list_state -= 1;
+                        }
+                        self.peer_files = vec![];
+                        self.log(
+                            format!("Removed manual peer {}:{}", peer.addr, peer.port),
+                            LogKind::Info,
+                        );
+                    } else {
+                        self.log("Only manually added peers can be removed", LogKind::Warning);
+                    }
+                }
             }
             _ => {}
         }
@@ -377,6 +439,26 @@ impl App {
                     format!("+ Sharing '{}' ({})", item.name, item.size_human()),
                     LogKind::Success,
                 );
+            }
+            AppEvent::ZipConfirmNeeded(req) => {
+                self.zip_confirm = Some(req);
+            }
+            AppEvent::ZipConfirmResult(path, should_zip) => {
+                let etx = self.event_tx.clone();
+                let shares_c = self.shares.clone();
+                tokio::spawn(async move {
+                    let etx2 = etx.clone();
+                    match shares_c.add_with_zip_choice(path, None, None, should_zip, move |folder_name| {
+                        let msg = format!("Zipping '{}' — this may take a moment…", folder_name);
+                        let etx2 = etx2.clone();
+                        tokio::spawn(async move {
+                            let _ = etx2.send(AppEvent::ZipStarted(msg)).await;
+                        });
+                    }) {
+                        Ok(item) => { etx.send(AppEvent::ShareAdded(item)).await.ok(); }
+                        Err(e) => { etx.send(AppEvent::ShareError(e.to_string())).await.ok(); }
+                    }
+                });
             }
             AppEvent::ZipStarted(msg) => {
                 self.log(msg, LogKind::Info);

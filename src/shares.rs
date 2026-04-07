@@ -162,6 +162,55 @@ impl ShareRegistry {
         })
     }
 
+    /// Like `add`, but for folders only — the caller decides whether to zip.
+    pub fn add_with_zip_choice(
+        &self,
+        path: PathBuf,
+        download_limit: Option<u32>,
+        expires_in_mins: Option<u64>,
+        should_zip: bool,
+        on_zipping: impl FnOnce(&str) + Send + 'static,
+    ) -> Result<SharedItem> {
+        let path = path.canonicalize()?;
+        if path.is_file() {
+            return self.add_file(path, download_limit, expires_in_mins);
+        }
+        if !path.is_dir() {
+            anyhow::bail!("Path is neither a file nor a directory: {:?}", path);
+        }
+        let name = path.file_name().unwrap().to_string_lossy().to_string();
+        let expires_at = expires_in_mins.map(|m| Utc::now() + chrono::Duration::minutes(m as i64));
+        let (file_count, _, total_size) = analyse_folder_full(&path);
+
+        let (final_path, kind, size, checksum) = if should_zip {
+            on_zipping(&name);
+            let zip_path = self.zip_cache_dir.join(format!("{}.zip", name));
+            zip_folder(&path, &zip_path)?;
+            let size = fs::metadata(&zip_path)?.len();
+            let checksum = compute_checksum(&zip_path)?;
+            (zip_path, ShareKind::ZippedFolder, size, checksum)
+        } else {
+            let checksum = format!("dir:{}", file_count);
+            (path, ShareKind::Folder, total_size, checksum)
+        };
+
+        let item = SharedItem {
+            id: Uuid::new_v4().to_string()[..8].to_string(),
+            name,
+            kind,
+            size,
+            path: final_path,
+            checksum,
+            added_at: Utc::now(),
+            download_count: 0,
+            download_limit,
+            expires_at,
+        };
+        let mut store = self.inner.write().unwrap();
+        store.insert(item.id.clone(), item.clone());
+        Ok(item)
+    }
+
     pub fn remove(&self, id: &str) -> bool {
         let mut store = self.inner.write().unwrap();
         store.remove(id).is_some()
@@ -203,7 +252,7 @@ fn compute_checksum(path: &Path) -> Result<String> {
     Ok(hex::encode(hasher.finalize()))
 }
 
-fn analyse_folder(path: &Path) -> (usize, usize) {
+pub fn analyse_folder(path: &Path) -> (usize, usize) {
     let mut file_count = 0;
     let mut max_depth = 0;
     for entry in WalkDir::new(path).into_iter().filter_map(|e| e.ok()) {
@@ -218,7 +267,27 @@ fn analyse_folder(path: &Path) -> (usize, usize) {
     (file_count, max_depth)
 }
 
-fn folder_size(path: &Path) -> u64 {
+/// Returns (file_count, max_depth, total_size_bytes)
+pub fn analyse_folder_full(path: &Path) -> (usize, usize, u64) {
+    let mut file_count = 0;
+    let mut max_depth = 0;
+    let mut total_size: u64 = 0;
+    for entry in WalkDir::new(path).into_iter().filter_map(|e| e.ok()) {
+        if entry.file_type().is_file() {
+            file_count += 1;
+            if let Ok(meta) = entry.metadata() {
+                total_size += meta.len();
+            }
+        }
+        let depth = entry.depth();
+        if depth > max_depth {
+            max_depth = depth;
+        }
+    }
+    (file_count, max_depth, total_size)
+}
+
+pub fn folder_size(path: &Path) -> u64 {
     WalkDir::new(path)
         .into_iter()
         .filter_map(|e| e.ok())

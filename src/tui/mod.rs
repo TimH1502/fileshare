@@ -58,9 +58,39 @@ fn try_share_path(
     let etx = event_tx.clone();
     let shares_c = shares.clone();
     tokio::spawn(async move {
-        if path.exists() {
+        if !path.exists() {
+            etx.send(AppEvent::ShareError(format!("Path not found: {}", cleaned))).await.ok();
+            return;
+        }
+        if path.is_dir() {
+            // Analyse folder first, then ask the user whether to zip
+            let path_c = path.clone();
+            let (file_count, max_depth, total_size) =
+                tokio::task::spawn_blocking(move || {
+                    crate::shares::analyse_folder_full(&path_c)
+                })
+                .await
+                .unwrap_or((0, 0, 0));
+
+            let folder_name = path
+                .file_name()
+                .unwrap_or_default()
+                .to_string_lossy()
+                .to_string();
+            let would_zip = file_count > 20 || max_depth > 5;
+
+            etx.send(AppEvent::ZipConfirmNeeded(app::ZipConfirmRequest {
+                path,
+                folder_name,
+                file_count,
+                total_size,
+                would_zip,
+            }))
+            .await
+            .ok();
+        } else {
+            // Plain file — share immediately
             let etx2 = etx.clone();
-            let name = path.file_name().unwrap_or_default().to_string_lossy().to_string();
             match shares_c.add(path, None, None, move |folder_name| {
                 let msg = format!("Zipping '{}' — this may take a moment…", folder_name);
                 let etx2 = etx2.clone();
@@ -71,8 +101,6 @@ fn try_share_path(
                 Ok(item) => { etx.send(AppEvent::ShareAdded(item)).await.ok(); }
                 Err(e) => { etx.send(AppEvent::ShareError(e.to_string())).await.ok(); }
             }
-        } else {
-            etx.send(AppEvent::ShareError(format!("Path not found: {}", cleaned))).await.ok();
         }
     });
 }

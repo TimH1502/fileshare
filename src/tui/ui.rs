@@ -1,5 +1,5 @@
 use crate::shares::ShareKind;
-use crate::tui::app::{App, DownloadState, Focus, LogKind};
+use crate::tui::app::{App, DownloadState, Focus, LogKind, ZipConfirmRequest};
 use ratatui::{
     layout::{Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
@@ -40,6 +40,10 @@ pub fn draw(f: &mut Frame, app: &App) {
 
     if app.manual_ip_input.is_some() {
         draw_manual_ip_overlay(f, app, area);
+    }
+
+    if let Some(ref req) = app.zip_confirm {
+        draw_zip_confirm_overlay(f, req, area);
     }
 }
 
@@ -95,9 +99,20 @@ fn draw_peer_list(f: &mut Frame, app: &App, area: Rect) {
         Style::default().fg(DIM)
     };
 
+    // Build title — show [x remove] hint if a manual peer is selected
+    let selected_is_manual = peers
+        .get(app.peer_list_state)
+        .map(|p| p.manual)
+        .unwrap_or(false);
+    let title_str = if focused && selected_is_manual {
+        format!(" Peers ({}) — [x] remove ", peers.len())
+    } else {
+        format!(" Peers ({}) ", peers.len())
+    };
+
     let block = Block::default()
         .title(Span::styled(
-            format!(" Peers ({}) ", peers.len()),
+            title_str,
             Style::default().fg(if focused { ACCENT } else { Color::White }),
         ))
         .borders(Borders::ALL)
@@ -117,6 +132,12 @@ fn draw_peer_list(f: &mut Frame, app: &App, area: Rect) {
             };
 
             let marker = if selected { "▶ " } else { "  " };
+            // Show a ✎ tag for manually added peers
+            let manual_tag = if peer.manual {
+                Span::styled(" [m]", Style::default().fg(Color::Yellow))
+            } else {
+                Span::raw("")
+            };
             let line = Line::from(vec![
                 Span::raw(marker),
                 Span::styled(&peer.username, style.fg(Color::White)),
@@ -128,6 +149,7 @@ fn draw_peer_list(f: &mut Frame, app: &App, area: Rect) {
                     format!(" [{}]", peer.share_count),
                     Style::default().fg(ACCENT),
                 ),
+                manual_tag,
             ]);
             ListItem::new(line)
         })
@@ -452,16 +474,48 @@ fn draw_log(f: &mut Frame, app: &App, area: Rect) {
 
 fn draw_status_bar(f: &mut Frame, app: &App, area: Rect) {
     let dl_dir = app.config.download_dir.display().to_string();
-    let status = Line::from(vec![
+
+    // Context-sensitive hints
+    let context_hints = match app.focus {
+        Focus::PeerList => {
+            let peers = app.peer_list();
+            let is_manual = peers.get(app.peer_list_state).map(|p| p.manual).unwrap_or(false);
+            if is_manual {
+                vec![
+                    Span::styled("[↑↓/jk] navigate  ", Style::default().fg(DIM)),
+                    Span::styled("[Enter] browse files  ", Style::default().fg(DIM)),
+                    Span::styled("[x] remove manual peer  ", Style::default().fg(Color::Yellow)),
+                    Span::styled("[m] add peer  ", Style::default().fg(DIM)),
+                ]
+            } else {
+                vec![
+                    Span::styled("[↑↓/jk] navigate  ", Style::default().fg(DIM)),
+                    Span::styled("[Enter] browse files  ", Style::default().fg(DIM)),
+                    Span::styled("[m] add peer manually  ", Style::default().fg(DIM)),
+                ]
+            }
+        }
+        Focus::PeerFiles => vec![
+            Span::styled("[↑↓/jk] navigate  ", Style::default().fg(DIM)),
+            Span::styled("[Enter/d] download  ", Style::default().fg(DIM)),
+            Span::styled("[←] back to peers  ", Style::default().fg(DIM)),
+        ],
+        Focus::MyShares => vec![
+            Span::styled("[↑↓/jk] navigate  ", Style::default().fg(DIM)),
+            Span::styled("[x/Del] remove share  ", Style::default().fg(Color::Yellow)),
+            Span::styled("drag & drop to add  ", Style::default().fg(DIM)),
+        ],
+    };
+
+    let mut spans = vec![
         Span::styled(" [Tab] switch panel  ", Style::default().fg(DIM)),
-        Span::styled("[↑↓/jk] navigate  ", Style::default().fg(DIM)),
-        Span::styled("[Enter/d] download  ", Style::default().fg(DIM)),
-        Span::styled("[x] remove share  ", Style::default().fg(DIM)),
-        Span::styled("[m] manual IP  ", Style::default().fg(DIM)),
-        Span::styled("[?] help  ", Style::default().fg(DIM)),
-        Span::styled("[q] quit  ", Style::default().fg(DIM)),
-        Span::styled(format!("  DL→ {}", dl_dir), Style::default().fg(DIM)),
-    ]);
+    ];
+    spans.extend(context_hints);
+    spans.push(Span::styled("[?] help  ", Style::default().fg(DIM)));
+    spans.push(Span::styled("[q] quit  ", Style::default().fg(DIM)));
+    spans.push(Span::styled(format!("  DL→ {}", dl_dir), Style::default().fg(DIM)));
+
+    let status = Line::from(spans);
     let bar = Paragraph::new(status).style(Style::default().bg(Color::Rgb(15, 20, 30)));
     f.render_widget(bar, area);
 }
@@ -485,6 +539,7 @@ fn draw_help_overlay(f: &mut Frame, area: Rect) {
         Line::from(""),
         Line::from(Span::styled(" Peers", Style::default().fg(Color::White).add_modifier(Modifier::BOLD))),
         Line::from(Span::styled("  m                 Add peer manually", Style::default().fg(DIM))),
+        Line::from(Span::styled("  x / Del           Remove manual peer", Style::default().fg(DIM))),
         Line::from(Span::styled("  Enter             Browse peer's files", Style::default().fg(DIM))),
         Line::from(""),
         Line::from(Span::styled(" Files", Style::default().fg(Color::White).add_modifier(Modifier::BOLD))),
@@ -493,6 +548,7 @@ fn draw_help_overlay(f: &mut Frame, area: Rect) {
         Line::from(""),
         Line::from(Span::styled(" Sharing", Style::default().fg(Color::White).add_modifier(Modifier::BOLD))),
         Line::from(Span::styled("  Drag & drop file  Share it", Style::default().fg(DIM))),
+        Line::from(Span::styled("  Drag & drop folder  → zip dialog", Style::default().fg(DIM))),
         Line::from(Span::styled("  Type path + Enter Share it", Style::default().fg(DIM))),
         Line::from(""),
         Line::from(Span::styled("  ?                 Toggle this help", Style::default().fg(DIM))),
@@ -532,6 +588,68 @@ fn draw_manual_ip_overlay(f: &mut Frame, app: &App, area: Rect) {
 
     let block = Block::default()
         .title(" Add Peer Manually ")
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(ACCENT))
+        .style(Style::default().bg(Color::Rgb(10, 15, 25)));
+
+    f.render_widget(Paragraph::new(text).block(block), popup);
+}
+
+fn draw_zip_confirm_overlay(f: &mut Frame, req: &ZipConfirmRequest, area: Rect) {
+    use crate::shares::human_size;
+
+    let w = 56u16;
+    let h = 11u16;
+    let x = area.width.saturating_sub(w) / 2;
+    let y = area.height.saturating_sub(h) / 2;
+    let popup = Rect::new(x, y, w.min(area.width), h.min(area.height));
+    f.render_widget(Clear, popup);
+
+    let size_str = human_size(req.total_size);
+    let zip_hint = if req.would_zip {
+        "Recommended: Yes (large folder)"
+    } else {
+        "Optional (small folder)"
+    };
+
+    let text = vec![
+        Line::from(vec![
+            Span::styled(" Folder: ", Style::default().fg(DIM)),
+            Span::styled(&req.folder_name, Style::default().fg(Color::White).add_modifier(Modifier::BOLD)),
+        ]),
+        Line::from(vec![
+            Span::styled(" Size:   ", Style::default().fg(DIM)),
+            Span::styled(&size_str, Style::default().fg(Color::White)),
+            Span::styled(
+                format!("  ({} files)", req.file_count),
+                Style::default().fg(DIM),
+            ),
+        ]),
+        Line::from(""),
+        Line::from(vec![
+            Span::styled(" Zip before sharing?  ", Style::default().fg(DIM)),
+            Span::styled(zip_hint, Style::default().fg(if req.would_zip { WARN } else { DIM })),
+        ]),
+        Line::from(vec![
+            Span::styled(
+                " Zipping saves bandwidth but takes time for large folders.",
+                Style::default().fg(DIM),
+            ),
+        ]),
+        Line::from(""),
+        Line::from(vec![
+            Span::styled(
+                "  [y] Zip & share    [n] Share as-is    [Esc] Cancel",
+                Style::default().fg(Color::White),
+            ),
+        ]),
+    ];
+
+    let block = Block::default()
+        .title(Span::styled(
+            " 📁 Share Folder ",
+            Style::default().fg(ACCENT).add_modifier(Modifier::BOLD),
+        ))
         .borders(Borders::ALL)
         .border_style(Style::default().fg(ACCENT))
         .style(Style::default().bg(Color::Rgb(10, 15, 25)));
