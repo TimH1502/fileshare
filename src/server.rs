@@ -197,7 +197,7 @@ pub fn build_router_with_connect_info(state: Arc<AppState>) -> axum::extract::co
     Router::new()
         .route("/", get(serve_browser_ui))
         .route("/shares", get(list_shares))
-        .route("/download/:id", get(download_file))
+        .route("/download/{id}", get(download_file))
         .with_state(state)
         .into_make_service_with_connect_info::<std::net::SocketAddr>()
 }

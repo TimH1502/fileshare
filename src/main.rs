@@ -7,7 +7,7 @@ mod tui;
 
 use anyhow::Result;
 use clap::{Parser, Subcommand};
-use std::net::SocketAddr;
+use std::{env, net::SocketAddr};
 use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::sync::broadcast;
@@ -51,6 +51,7 @@ enum Commands {
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    env::set_var("RUST_BACKTRACE", "1");
     let cli = Cli::parse();
 
     match cli.command {

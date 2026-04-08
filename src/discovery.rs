@@ -172,7 +172,7 @@ pub async fn run_mdns(
                             .get_addresses_v4()
                             .into_iter()
                             .next()
-                            .map(|a| IpAddr::V4(*a))
+                            .map(|a| IpAddr::V4(a))
                         {
                             registry.upsert(addr, new_port, username, share_count);
                         }

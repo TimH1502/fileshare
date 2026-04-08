@@ -2,6 +2,7 @@ use anyhow::Result;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
+use zip::write::FileOptions;
 use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -471,7 +472,7 @@ pub fn folder_size(path: &Path) -> u64 {
 fn zip_folder(src: &Path, dest: &Path) -> Result<()> {
     let file = fs::File::create(dest)?;
     let mut zip = zip::ZipWriter::new(file);
-    let options = zip::write::FileOptions::default()
+    let options: FileOptions<()> = FileOptions::default()
         .compression_method(zip::CompressionMethod::Deflated)
         .unix_permissions(0o755);
 
