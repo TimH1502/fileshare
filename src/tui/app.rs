@@ -330,12 +330,11 @@ impl App {
             }
             KeyCode::Delete | KeyCode::Char('x') => {
                 if let Some(item) = shares.into_iter().nth(self.my_shares_state) {
-                    let removed = self.shares.remove(&item.id);
-                    if removed {
+                    if let Some(removed) = self.shares.remove(&item.id) {
                         if self.my_shares_state > 0 {
                             self.my_shares_state -= 1;
                         }
-                        self.log(format!("Removed '{}' from shares", item.name), LogKind::Info);
+                        self.log(format!("Removed '{}' from shares", removed.name), LogKind::Info);
                     }
                 }
             }

@@ -110,6 +110,7 @@ pub async fn run(
     peers: PeerRegistry,
     shares: ShareRegistry,
     mut server_events: tokio::sync::broadcast::Receiver<ServerEvent>,
+    restored: usize,
 ) -> Result<()> {
     enable_raw_mode()?;
     let mut stdout = io::stdout();
@@ -122,9 +123,15 @@ pub async fn run(
     let mut app = App::new(config, peers, shares.clone(), event_tx.clone());
 
     app.log(
-        "fileshare started — drag & drop files to share them",
+        "fileshare started — drag & drop or [m] to add a path",
         app::LogKind::Info,
     );
+    if restored > 0 {
+        app.log(
+            format!("Restored {} share(s) from last session", restored),
+            app::LogKind::Success,
+        );
+    }
     app.log(
         "Listening for peers on the local network…",
         app::LogKind::Info,

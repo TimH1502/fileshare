@@ -71,20 +71,128 @@ pub fn human_size(size: u64) -> String {
     }
 }
 
+// ---------------------------------------------------------------------------
+// On-disk index
+// ---------------------------------------------------------------------------
+
+#[derive(Serialize, Deserialize, Default)]
+struct ShareIndex {
+    items: Vec<SharedItem>,
+}
+
+// ---------------------------------------------------------------------------
+// Registry
+// ---------------------------------------------------------------------------
+
 #[derive(Clone)]
 pub struct ShareRegistry {
     inner: Arc<RwLock<HashMap<String, SharedItem>>>,
     pub zip_cache_dir: PathBuf,
+    index_path: PathBuf,
 }
 
 impl ShareRegistry {
-    pub fn new(zip_cache_dir: PathBuf) -> Self {
+    pub fn new(zip_cache_dir: PathBuf, index_path: PathBuf) -> Self {
         fs::create_dir_all(&zip_cache_dir).ok();
         Self {
             inner: Arc::new(RwLock::new(HashMap::new())),
             zip_cache_dir,
+            index_path,
         }
     }
+
+    // -----------------------------------------------------------------------
+    // Index persistence
+    // -----------------------------------------------------------------------
+
+    /// Serialize all in-memory items to the index file atomically.
+    fn save_index(&self) {
+        let store = self.inner.read().unwrap();
+        let index = ShareIndex {
+            items: store.values().cloned().collect(),
+        };
+        drop(store);
+
+        if let Some(parent) = self.index_path.parent() {
+            fs::create_dir_all(parent).ok();
+        }
+        if let Ok(json) = serde_json::to_string_pretty(&index) {
+            // Write to a temp file first then rename for atomicity
+            let tmp = self.index_path.with_extension("tmp");
+            if fs::write(&tmp, &json).is_ok() {
+                fs::rename(&tmp, &self.index_path).ok();
+            }
+        }
+    }
+
+    /// Restore shares from the index on startup.
+    /// - Validates that each path still exists on disk.
+    /// - Drops expired / limit-reached entries.
+    /// - Deletes orphaned zip files (zips in the cache dir not referenced by any index entry).
+    /// Returns the number of shares successfully restored.
+    pub fn restore_from_index(&self) -> usize {
+        // Read index file
+        let raw = match fs::read_to_string(&self.index_path) {
+            Ok(s) => s,
+            Err(_) => {
+                // First run — no index yet. Still clean up any stray zips.
+                self.prune_orphan_zips(&[]);
+                return 0;
+            }
+        };
+        let index: ShareIndex = match serde_json::from_str(&raw) {
+            Ok(i) => i,
+            Err(_) => {
+                self.prune_orphan_zips(&[]);
+                return 0;
+            }
+        };
+
+        let mut store = self.inner.write().unwrap();
+        let mut restored = 0usize;
+        let mut valid_zip_paths: Vec<PathBuf> = Vec::new();
+
+        for item in index.items {
+            // Drop if time- or count-expired
+            if item.is_expired() || item.is_limit_reached() {
+                continue;
+            }
+            // Drop if the path on disk is gone
+            if !item.path.exists() {
+                continue;
+            }
+            if item.kind == ShareKind::ZippedFolder {
+                valid_zip_paths.push(item.path.clone());
+            }
+            store.insert(item.id.clone(), item);
+            restored += 1;
+        }
+        drop(store);
+
+        // Remove any zip files not in the validated list
+        self.prune_orphan_zips(&valid_zip_paths);
+
+        restored
+    }
+
+    /// Delete `.zip` files inside the cache directory that are not listed in `valid_zips`.
+    fn prune_orphan_zips(&self, valid_zips: &[PathBuf]) {
+        let Ok(entries) = fs::read_dir(&self.zip_cache_dir) else {
+            return;
+        };
+        for entry in entries.filter_map(|e| e.ok()) {
+            let path = entry.path();
+            if path.extension().and_then(|e| e.to_str()) == Some("zip")
+                && !valid_zips.contains(&path)
+            {
+                fs::remove_file(&path).ok();
+            }
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // Adding shares
+    // -----------------------------------------------------------------------
 
     pub fn add(
         &self,
@@ -104,14 +212,22 @@ impl ShareRegistry {
 
         let mut store = self.inner.write().unwrap();
         store.insert(item.id.clone(), item.clone());
+        drop(store);
+        self.save_index();
         Ok(item)
     }
 
-    fn add_file(&self, path: PathBuf, download_limit: Option<u32>, expires_in_mins: Option<u64>) -> Result<SharedItem> {
+    fn add_file(
+        &self,
+        path: PathBuf,
+        download_limit: Option<u32>,
+        expires_in_mins: Option<u64>,
+    ) -> Result<SharedItem> {
         let name = path.file_name().unwrap().to_string_lossy().to_string();
         let size = fs::metadata(&path)?.len();
         let checksum = compute_checksum(&path)?;
-        let expires_at = expires_in_mins.map(|m| Utc::now() + chrono::Duration::minutes(m as i64));
+        let expires_at =
+            expires_in_mins.map(|m| Utc::now() + chrono::Duration::minutes(m as i64));
 
         Ok(SharedItem {
             id: Uuid::new_v4().to_string()[..8].to_string(),
@@ -127,11 +243,17 @@ impl ShareRegistry {
         })
     }
 
-    fn add_folder(&self, path: PathBuf, download_limit: Option<u32>, expires_in_mins: Option<u64>, on_zipping: impl FnOnce(&str)) -> Result<SharedItem> {
+    fn add_folder(
+        &self,
+        path: PathBuf,
+        download_limit: Option<u32>,
+        expires_in_mins: Option<u64>,
+        on_zipping: impl FnOnce(&str),
+    ) -> Result<SharedItem> {
         let name = path.file_name().unwrap().to_string_lossy().to_string();
-        let expires_at = expires_in_mins.map(|m| Utc::now() + chrono::Duration::minutes(m as i64));
+        let expires_at =
+            expires_in_mins.map(|m| Utc::now() + chrono::Duration::minutes(m as i64));
 
-        // Heuristic: zip if > 20 files or > 5 levels deep
         let (file_count, max_depth) = analyse_folder(&path);
         let should_zip = file_count > 20 || max_depth > 5;
 
@@ -162,7 +284,7 @@ impl ShareRegistry {
         })
     }
 
-    /// Like `add`, but for folders only — the caller decides whether to zip.
+    /// Folder-only variant where the caller decides whether to zip.
     pub fn add_with_zip_choice(
         &self,
         path: PathBuf,
@@ -173,13 +295,20 @@ impl ShareRegistry {
     ) -> Result<SharedItem> {
         let path = path.canonicalize()?;
         if path.is_file() {
-            return self.add_file(path, download_limit, expires_in_mins);
+            let item = self.add_file(path, download_limit, expires_in_mins)?;
+            let mut store = self.inner.write().unwrap();
+            store.insert(item.id.clone(), item.clone());
+            drop(store);
+            self.save_index();
+            return Ok(item);
         }
         if !path.is_dir() {
             anyhow::bail!("Path is neither a file nor a directory: {:?}", path);
         }
+
         let name = path.file_name().unwrap().to_string_lossy().to_string();
-        let expires_at = expires_in_mins.map(|m| Utc::now() + chrono::Duration::minutes(m as i64));
+        let expires_at =
+            expires_in_mins.map(|m| Utc::now() + chrono::Duration::minutes(m as i64));
         let (file_count, _, total_size) = analyse_folder_full(&path);
 
         let (final_path, kind, size, checksum) = if should_zip {
@@ -208,13 +337,34 @@ impl ShareRegistry {
         };
         let mut store = self.inner.write().unwrap();
         store.insert(item.id.clone(), item.clone());
+        drop(store);
+        self.save_index();
         Ok(item)
     }
 
-    pub fn remove(&self, id: &str) -> bool {
+    // -----------------------------------------------------------------------
+    // Removing shares
+    // -----------------------------------------------------------------------
+
+    /// Remove a share by id. If it was a ZippedFolder, delete the zip from cache.
+    /// Returns the removed item so the caller can log its name.
+    pub fn remove(&self, id: &str) -> Option<SharedItem> {
         let mut store = self.inner.write().unwrap();
-        store.remove(id).is_some()
+        let item = store.remove(id);
+        drop(store);
+
+        if let Some(ref it) = item {
+            if it.kind == ShareKind::ZippedFolder && it.path.exists() {
+                fs::remove_file(&it.path).ok();
+            }
+            self.save_index();
+        }
+        item
     }
+
+    // -----------------------------------------------------------------------
+    // Queries & mutations
+    // -----------------------------------------------------------------------
 
     pub fn get(&self, id: &str) -> Option<SharedItem> {
         let store = self.inner.read().unwrap();
@@ -237,13 +387,34 @@ impl ShareRegistry {
         if let Some(item) = store.get_mut(id) {
             item.download_count += 1;
         }
+        drop(store);
+        self.save_index();
     }
 
     pub fn prune_expired(&self) {
         let mut store = self.inner.write().unwrap();
+        // Collect zips belonging to expired/limit-reached items so we can delete them
+        let to_delete: Vec<PathBuf> = store
+            .values()
+            .filter(|v| v.is_expired() || v.is_limit_reached())
+            .filter(|v| v.kind == ShareKind::ZippedFolder)
+            .map(|v| v.path.clone())
+            .collect();
         store.retain(|_, v| !v.is_expired() && !v.is_limit_reached());
+        drop(store);
+
+        for path in to_delete {
+            if path.exists() {
+                fs::remove_file(&path).ok();
+            }
+        }
+        self.save_index();
     }
 }
+
+// ---------------------------------------------------------------------------
+// Helpers
+// ---------------------------------------------------------------------------
 
 fn compute_checksum(path: &Path) -> Result<String> {
     let data = fs::read(path)?;

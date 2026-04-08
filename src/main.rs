@@ -115,7 +115,16 @@ async fn run_tui(username_override: Option<String>, port_override: Option<u16>) 
         .unwrap_or(&config.download_dir)
         .join(".fileshare_zip_cache");
 
-    let shares = ShareRegistry::new(cache_dir);
+    // Index lives next to config.toml for easy discovery
+    let index_path = Config::config_path()
+        .parent()
+        .map(|p| p.to_path_buf())
+        .unwrap_or_else(|| std::path::PathBuf::from("."))
+        .join("shares.index.json");
+
+    let shares = ShareRegistry::new(cache_dir, index_path);
+    let restored = shares.restore_from_index();
+
     let peers = PeerRegistry::new();
 
     let (event_tx, event_rx) = broadcast::channel::<ServerEvent>(64);
@@ -135,7 +144,7 @@ async fn run_tui(username_override: Option<String>, port_override: Option<u16>) 
         axum::serve(listener, router).await.ok();
     });
 
-    // ✅ Start mDNS (single task owning everything)
+    // Start mDNS
     {
         let username = config.username.clone();
         let port = config.port;
@@ -148,9 +157,9 @@ async fn run_tui(username_override: Option<String>, port_override: Option<u16>) 
                 .ok();
         });
     }
-    
-    // Run TUI
-    tui::run(config, peers, shares, event_rx).await?;
+
+    // Run TUI (passes restored count so the startup log can mention it)
+    tui::run(config, peers, shares, event_rx, restored).await?;
 
     Ok(())
 }
@@ -165,7 +174,12 @@ async fn run_send(
     let config = setup(username_override, port_override).await?;
 
     let cache_dir = config.download_dir.parent().unwrap_or(&config.download_dir).join(".fileshare_zip_cache");
-    let shares = ShareRegistry::new(cache_dir);
+    let index_path = Config::config_path()
+        .parent()
+        .map(|p| p.to_path_buf())
+        .unwrap_or_else(|| std::path::PathBuf::from("."))
+        .join("shares.index.json");
+    let shares = ShareRegistry::new(cache_dir, index_path);
     let item = shares.add(path, limit, expires, |name| {
             println!("Zipping '{}' — this may take a moment…", name);
         })?;
