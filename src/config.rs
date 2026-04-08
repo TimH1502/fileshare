@@ -13,12 +13,26 @@ pub struct Config {
 
 impl Default for Config {
     fn default() -> Self {
+        // Try system download folder first
+        let mut download_dir = dirs::download_dir().unwrap_or_else(|| {
+            // fallback: current directory + "downloads"
+            let mut cwd = std::env::current_dir().expect("Cannot determine current directory");
+            cwd.push("downloads");
+            cwd
+        });
+
+        // Use a subfolder for your app
+        download_dir.push("fileshare");
+
+        // Make sure it exists
+        if let Err(e) = std::fs::create_dir_all(&download_dir) {
+            panic!("Failed to create download directory {:?}: {}", download_dir, e);
+        }
+
         Self {
             username: String::new(),
             port: 7777,
-            download_dir: dirs::download_dir()
-                .unwrap_or_else(|| PathBuf::from("."))
-                .join("fileshare"),
+            download_dir,
         }
     }
 }
