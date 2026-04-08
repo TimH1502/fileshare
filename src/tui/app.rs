@@ -84,6 +84,7 @@ pub struct App {
 
     pub show_help: bool,
     pub manual_ip_input: Option<String>,
+    pub manual_path_input: Option<String>,
     pub status_message: Option<String>,
 
     /// Pending zip confirmation dialog (shown when a folder is dropped)
@@ -113,6 +114,7 @@ impl App {
             active_download: None,
             show_help: false,
             manual_ip_input: None,
+            manual_path_input: None,
             status_message: None,
             zip_confirm: None,
             event_tx,
@@ -174,6 +176,28 @@ impl App {
             return;
         }
 
+        // Manual path input mode (opened from MyShares with 'm')
+        if let Some(ref mut input) = self.manual_path_input {
+            match key.code {
+                KeyCode::Char(c) => input.push(c),
+                KeyCode::Backspace => { input.pop(); }
+                KeyCode::Enter => {
+                    let path_str = input.clone();
+                    self.manual_path_input = None;
+                    // Reuse the drag-and-drop path via AddShare event
+                    let tx = self.event_tx.clone();
+                    tokio::spawn(async move {
+                        tx.send(AppEvent::AddShare(std::path::PathBuf::from(path_str))).await.ok();
+                    });
+                }
+                KeyCode::Esc => {
+                    self.manual_path_input = None;
+                }
+                _ => {}
+            }
+            return;
+        }
+
         // Manual IP input mode
         if let Some(ref mut input) = self.manual_ip_input {
             match key.code {
@@ -211,7 +235,14 @@ impl App {
                 self.show_help = !self.show_help;
             }
             KeyCode::Char('m') => {
-                self.manual_ip_input = Some(String::new());
+                match self.focus {
+                    Focus::MyShares => {
+                        self.manual_path_input = Some(String::new());
+                    }
+                    _ => {
+                        self.manual_ip_input = Some(String::new());
+                    }
+                }
             }
             _ => {
                 match self.focus {

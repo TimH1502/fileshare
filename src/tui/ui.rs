@@ -42,6 +42,10 @@ pub fn draw(f: &mut Frame, app: &App) {
         draw_manual_ip_overlay(f, app, area);
     }
 
+    if app.manual_path_input.is_some() {
+        draw_manual_path_overlay(f, app, area);
+    }
+
     if let Some(ref req) = app.zip_confirm {
         draw_zip_confirm_overlay(f, req, area);
     }
@@ -328,7 +332,7 @@ fn draw_my_shares(f: &mut Frame, app: &App, area: Rect) {
 
     let block = Block::default()
         .title(Span::styled(
-            format!(" My Shares ({}) — drag & drop files here, or 'x' to remove ", shares.len()),
+            format!(" My Shares ({}) — drag & drop, [m] add path, [x] remove ", shares.len()),
             Style::default().fg(if focused { ACCENT } else { Color::White }),
         ))
         .borders(Borders::ALL)
@@ -503,6 +507,7 @@ fn draw_status_bar(f: &mut Frame, app: &App, area: Rect) {
         Focus::MyShares => vec![
             Span::styled("[↑↓/jk] navigate  ", Style::default().fg(DIM)),
             Span::styled("[x/Del] remove share  ", Style::default().fg(Color::Yellow)),
+            Span::styled("[m] add path  ", Style::default().fg(DIM)),
             Span::styled("drag & drop to add  ", Style::default().fg(DIM)),
         ],
     };
@@ -549,6 +554,7 @@ fn draw_help_overlay(f: &mut Frame, area: Rect) {
         Line::from(Span::styled(" Sharing", Style::default().fg(Color::White).add_modifier(Modifier::BOLD))),
         Line::from(Span::styled("  Drag & drop file  Share it", Style::default().fg(DIM))),
         Line::from(Span::styled("  Drag & drop folder  → zip dialog", Style::default().fg(DIM))),
+        Line::from(Span::styled("  m (in My Shares)  Type a path manually", Style::default().fg(DIM))),
         Line::from(Span::styled("  Type path + Enter Share it", Style::default().fg(DIM))),
         Line::from(""),
         Line::from(Span::styled("  ?                 Toggle this help", Style::default().fg(DIM))),
@@ -588,6 +594,57 @@ fn draw_manual_ip_overlay(f: &mut Frame, app: &App, area: Rect) {
 
     let block = Block::default()
         .title(" Add Peer Manually ")
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(ACCENT))
+        .style(Style::default().bg(Color::Rgb(10, 15, 25)));
+
+    f.render_widget(Paragraph::new(text).block(block), popup);
+}
+
+fn draw_manual_path_overlay(f: &mut Frame, app: &App, area: Rect) {
+    // Make the popup wide enough to show long paths
+    let w = (area.width).min(70).max(52);
+    let h = 7u16;
+    let x = area.width.saturating_sub(w) / 2;
+    let y = area.height.saturating_sub(h) / 2;
+    let popup = Rect::new(x, y, w, h.min(area.height));
+    f.render_widget(Clear, popup);
+
+    let input = app.manual_path_input.as_deref().unwrap_or("");
+    // Scroll the display so the cursor (end) is always visible
+    let inner_w = (w as usize).saturating_sub(5); // account for border + " > "
+    let display_input = if input.len() > inner_w {
+        &input[input.len() - inner_w..]
+    } else {
+        input
+    };
+
+    let text = vec![
+        Line::from(Span::styled(
+            " Enter file or folder path:",
+            Style::default().fg(DIM),
+        )),
+        Line::from(Span::styled(
+            " Windows: C:\\Users\\Tim\\Downloads\\file.txt",
+            Style::default().fg(DIM),
+        )),
+        Line::from(Span::styled(
+            " Unix:    /home/tim/downloads/file.txt",
+            Style::default().fg(DIM),
+        )),
+        Line::from(""),
+        Line::from(vec![
+            Span::styled(" > ", Style::default().fg(ACCENT).add_modifier(Modifier::BOLD)),
+            Span::styled(display_input, Style::default().fg(Color::White)),
+            Span::styled("█", Style::default().fg(ACCENT)),
+        ]),
+    ];
+
+    let block = Block::default()
+        .title(Span::styled(
+            " 📂 Add Path Manually ",
+            Style::default().fg(ACCENT).add_modifier(Modifier::BOLD),
+        ))
         .borders(Borders::ALL)
         .border_style(Style::default().fg(ACCENT))
         .style(Style::default().bg(Color::Rgb(10, 15, 25)));

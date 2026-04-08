@@ -185,8 +185,11 @@ pub async fn run(
                         if key.kind != KeyEventKind::Press {
                             continue;
                         }
-                        // Global quit (but not while accumulating a path)
-                        if !accumulating {
+                        // Global quit (but not while accumulating a path or in any input mode)
+                        let in_input_mode = app.manual_ip_input.is_some()
+                            || app.manual_path_input.is_some()
+                            || app.zip_confirm.is_some();
+                        if !accumulating && !in_input_mode {
                             if key.code == KeyCode::Char('q')
                                 || (key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL))
                             {
@@ -201,20 +204,13 @@ pub async fn run(
 
                         match key.code {
                             KeyCode::Char(c) => {
-                                // Decide: is this the start of a path burst or a normal keypress?
-                                // A path burst starts with '/' (Unix) or a drive letter followed quickly
-                                // by more chars. We detect by: if path_buf is non-empty we're already
-                                // accumulating; or if the char could start a path (drive letter or slash).
-                                let could_start_path = c == '/' || c == '\\'; // remove alphabetic entirely
+                                let could_start_path = c == '/' || c == '\\';
 
                                 if accumulating || (!path_buf.is_empty()) {
-                                    // Continue accumulating
                                     path_buf.push(c);
                                     last_key_time = Some(Instant::now());
-                                } else if could_start_path && app.manual_ip_input.is_none() {
+                                } else if could_start_path && !in_input_mode {
                                     // Speculatively start accumulating — this might be drag & drop
-                                    // We'll decide after the debounce: if path_buf looks like a path,
-                                    // treat it as one; otherwise replay it as a normal key.
                                     path_buf.push(c);
                                     last_key_time = Some(Instant::now());
                                     accumulating = false; // tentative — wait for more chars
@@ -280,14 +276,17 @@ pub async fn run(
                             let raw = path_buf.clone();
                             path_buf.clear();
                             last_key_time = None;
-                            // It's just a single char, not a path — replay as nothing
-                            // (single-char input that didn't grow into a path is ambiguous;
-                            // safest to discard rather than mis-route)
                             let _ = raw;
                         }
                     }
                 }
-                app.handle_event(app_event);
+                // AddShare: manual path entry — route through the same logic as drag & drop
+                if let AppEvent::AddShare(ref p) = app_event {
+                    let raw = p.to_string_lossy().to_string();
+                    try_share_path(&raw, &shares, &event_tx);
+                } else {
+                    app.handle_event(app_event);
+                }
             }
         }
     }
