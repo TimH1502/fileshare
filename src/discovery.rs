@@ -33,10 +33,7 @@ pub struct Peer {
 
 impl Peer {
     pub fn http_base(&self) -> String {
-        match self.addr {
-            IpAddr::V6(v6) => format!("http://[{}]:{}", v6, self.port),
-            IpAddr::V4(_) => format!("http://{}:{}", self.addr, self.port),
-        }
+        format!("http://{}:{}", self.addr, self.port)
     }
 
     pub fn is_stale(&self) -> bool {
@@ -69,7 +66,9 @@ impl PeerRegistry {
     pub fn upsert(&self, addr: IpAddr, port: u16, username: String, share_count: usize) {
         let key = format!("{}:{}", addr, port);
         let mut peers = self.inner.write().unwrap();
+
         let was_manual = peers.get(&key).map(|p| p.manual).unwrap_or(false);
+
         peers.insert(
             key,
             Peer {
@@ -93,7 +92,7 @@ impl PeerRegistry {
         peers.values().cloned().collect()
     }
 
-    pub fn add_manual(&self, addr: IpAddr, port: u16) {
+        pub fn add_manual(&self, addr: IpAddr, port: u16) {
         let key = format!("{}:{}", addr, port);
         let mut peers = self.inner.write().unwrap();
         peers.insert(
@@ -114,10 +113,12 @@ impl PeerRegistry {
         let mut peers = self.inner.write().unwrap();
         peers.remove(&key);
     }
+
+
 }
 
 // ---------------------------------------------------------------------------
-// mDNS
+// PUBLIC ENTRY POINT (THIS REPLACES BOTH run_announcer + run_listener)
 // ---------------------------------------------------------------------------
 
 pub async fn run_mdns(
@@ -132,61 +133,56 @@ pub async fn run_mdns(
     let host = format!("{}.local.", gethostname());
 
     // -----------------------------------------------------------------------
-    // LISTENER
+    // LISTENER (runs on blocking thread)
     // -----------------------------------------------------------------------
 
     let receiver = daemon.browse(SERVICE_TYPE)?;
 
     {
         let registry = peer_registry.clone();
-        let hostname = host.clone();
 
+        let hostname = host.clone();
         std::thread::spawn(move || {
             for event in receiver {
-                if let ServiceEvent::ServiceResolved(info) = event {
-                    let new_port = info.get_port();
-                    let resolved_host = info.get_hostname();
+                match event {
+                    ServiceEvent::ServiceResolved(info) => {
+                        let new_port = info.get_port();
+                        let resolved_host = info.get_hostname();
 
-                    // Filter self
-                    if new_port == port && resolved_host == hostname {
-                        continue;
+                        // FILTER YOURSELF HERE
+                        if new_port == port && resolved_host == hostname {
+                            continue;
+                        }
+
+                        let props = info.get_properties();
+
+                        // FILTER foreign services
+                        if props.get("app").map(|p| p.val_str()) != Some(APP_ID) {
+                            continue;
+                        }
+
+                        let username = info
+                            .get_properties()
+                            .get("username")
+                            .map(|p| p.val_str().to_owned())
+                            .unwrap_or_else(|| info.get_fullname().to_owned());
+
+                        let share_count: usize = info
+                            .get_properties()
+                            .get("share_count")
+                            .and_then(|p| p.val_str().parse::<usize>().ok())
+                            .unwrap_or(0);
+
+                        if let Some(addr) = info
+                            .get_addresses_v4()
+                            .into_iter()
+                            .next()
+                            .map(|a| IpAddr::V4(a))
+                        {
+                            registry.upsert(addr, new_port, username, share_count);
+                        }
                     }
-
-                    let props = info.get_properties();
-
-                    // Filter foreign services by app name
-                    if props.get("app").map(|p| p.val_str()) != Some(APP_ID) {
-                        continue;
-                    }
-
-                    let username = props
-                        .get("username")
-                        .map(|p| p.val_str().to_owned())
-                        .unwrap_or_else(|| info.get_fullname().to_owned());
-
-                    let share_count: usize = props
-                        .get("share_count")
-                        .and_then(|p| p.val_str().parse::<usize>().ok())
-                        .unwrap_or(0);
-
-                    // FIX: prefer IPv4 but fall back to IPv6
-                    // get_addresses() returns &HashSet<ScopedIp>; ScopedIp wraps IpAddr
-                    // but does not implement Copy, so we call .into_addr() to unwrap it.
-                    let addr: Option<IpAddr> = info
-                        .get_addresses_v4()
-                        .into_iter()
-                        .next()
-                        .map(|a| IpAddr::V4(a))
-                        .or_else(|| {
-                            info.get_addresses()
-                                .iter()
-                                .find(|s| s.is_ipv6())
-                                .map(|s| s.to_ip_addr())
-                        });
-
-                    if let Some(addr) = addr {
-                        registry.upsert(addr, new_port, username, share_count);
-                    }
+                    _ => {}
                 }
             }
         });
@@ -207,39 +203,38 @@ pub async fn run_mdns(
     }
 
     // -----------------------------------------------------------------------
-    // ANNOUNCER — re-announce when share count changes or on heartbeat
-    // FIX: removed unused `last_count` variable that was assigned but never read.
-    // Now we track it properly to avoid unnecessary re-registers.
+    // ANNOUNCER LOOP (ONLY PLACE THAT TOUCHES daemon.register!)
     // -----------------------------------------------------------------------
 
-    let mut announced_count: Option<usize> = None;
+    let mut last_count = 0;
 
     loop {
         tokio::time::sleep(Duration::from_secs(ANNOUNCE_INTERVAL_SECS)).await;
 
         let count = share_registry.list_available().len();
 
-        // Re-register when count changed (or first time)
-        if announced_count != Some(count) {
-            let fullname = format!("{}.{}", instance, SERVICE_TYPE);
-            daemon.unregister(&fullname).ok();
+        let fullname = format!("{}.{}", instance, SERVICE_TYPE);
 
-            let props = build_props(&username, count);
+        // Always re-announce (refresh TTL)
+        daemon.unregister(&fullname).ok();
 
-            let service = ServiceInfo::new(
-                SERVICE_TYPE,
-                &instance,
-                &host,
-                "",
-                port,
-                Some(props),
-            )?
-            .enable_addr_auto();
+        let props = build_props(&username, count);
 
-            daemon.register(service)?;
-            announced_count = Some(count);
-        }
+        let service = ServiceInfo::new(
+            SERVICE_TYPE,
+            &instance,
+            &host,
+            "",
+            port,
+            Some(props),
+        )?
+        .enable_addr_auto();
+
+        daemon.register(service)?;
+
+        last_count = count;
     }
+    
 }
 
 // ---------------------------------------------------------------------------
@@ -250,8 +245,10 @@ fn build_props(username: &str, share_count: usize) -> HashMap<String, String> {
     let mut m = HashMap::new();
     m.insert("username".to_owned(), username.to_owned());
     m.insert("share_count".to_owned(), share_count.to_string());
+
     m.insert("app".to_owned(), APP_ID.to_owned());
     m.insert("version".to_owned(), PROTOCOL_VERSION.to_owned());
+    
     m
 }
 
@@ -260,6 +257,7 @@ fn sanitise_instance_name(name: &str) -> String {
         .chars()
         .map(|c| if c.is_alphanumeric() || c == '-' { c } else { '_' })
         .collect();
+
     s[..s.len().min(63)].to_owned()
 }
 
