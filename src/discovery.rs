@@ -12,6 +12,11 @@ const SERVICE_TYPE: &str = "_fileshare._tcp.local.";
 const PEER_TIMEOUT_SECS: i64 = 15;
 const ANNOUNCE_INTERVAL_SECS: u64 = 3;
 
+/// App identifier embedded in mDNS TXT records.
+const APP_ID: &str = env!("CARGO_PKG_NAME");
+/// Protocol version — bump when the wire format changes, not on every release.
+const PROTOCOL_VERSION: &str = "1";
+
 // ---------------------------------------------------------------------------
 // Peer
 // ---------------------------------------------------------------------------
@@ -28,7 +33,10 @@ pub struct Peer {
 
 impl Peer {
     pub fn http_base(&self) -> String {
-        format!("http://{}:{}", self.addr, self.port)
+        match self.addr {
+            IpAddr::V6(v6) => format!("http://[{}]:{}", v6, self.port),
+            IpAddr::V4(_) => format!("http://{}:{}", self.addr, self.port),
+        }
     }
 
     pub fn is_stale(&self) -> bool {
@@ -61,9 +69,7 @@ impl PeerRegistry {
     pub fn upsert(&self, addr: IpAddr, port: u16, username: String, share_count: usize) {
         let key = format!("{}:{}", addr, port);
         let mut peers = self.inner.write().unwrap();
-
         let was_manual = peers.get(&key).map(|p| p.manual).unwrap_or(false);
-
         peers.insert(
             key,
             Peer {
@@ -87,7 +93,7 @@ impl PeerRegistry {
         peers.values().cloned().collect()
     }
 
-        pub fn add_manual(&self, addr: IpAddr, port: u16) {
+    pub fn add_manual(&self, addr: IpAddr, port: u16) {
         let key = format!("{}:{}", addr, port);
         let mut peers = self.inner.write().unwrap();
         peers.insert(
@@ -108,12 +114,10 @@ impl PeerRegistry {
         let mut peers = self.inner.write().unwrap();
         peers.remove(&key);
     }
-
-
 }
 
 // ---------------------------------------------------------------------------
-// PUBLIC ENTRY POINT (THIS REPLACES BOTH run_announcer + run_listener)
+// mDNS
 // ---------------------------------------------------------------------------
 
 pub async fn run_mdns(
@@ -128,56 +132,61 @@ pub async fn run_mdns(
     let host = format!("{}.local.", gethostname());
 
     // -----------------------------------------------------------------------
-    // LISTENER (runs on blocking thread)
+    // LISTENER
     // -----------------------------------------------------------------------
 
     let receiver = daemon.browse(SERVICE_TYPE)?;
 
     {
         let registry = peer_registry.clone();
-
         let hostname = host.clone();
+
         std::thread::spawn(move || {
             for event in receiver {
-                match event {
-                    ServiceEvent::ServiceResolved(info) => {
-                        let new_port = info.get_port();
-                        let resolved_host = info.get_hostname();
+                if let ServiceEvent::ServiceResolved(info) = event {
+                    let new_port = info.get_port();
+                    let resolved_host = info.get_hostname();
 
-                        // FILTER YOURSELF HERE
-                        if new_port == port && resolved_host == hostname {
-                            continue;
-                        }
-
-                        let props = info.get_properties();
-
-                        // FILTER foreign services
-                        if props.get("app").map(|p| p.val_str()) != Some("local_fileshare") { // shouldnt be hardcoded, better use git hash etc.
-                            continue;
-                        }
-
-                        let username = info
-                            .get_properties()
-                            .get("username")
-                            .map(|p| p.val_str().to_owned())
-                            .unwrap_or_else(|| info.get_fullname().to_owned());
-
-                        let share_count: usize = info
-                            .get_properties()
-                            .get("share_count")
-                            .and_then(|p| p.val_str().parse::<usize>().ok())
-                            .unwrap_or(0);
-
-                        if let Some(addr) = info
-                            .get_addresses_v4()
-                            .into_iter()
-                            .next()
-                            .map(|a| IpAddr::V4(a))
-                        {
-                            registry.upsert(addr, new_port, username, share_count);
-                        }
+                    // Filter self
+                    if new_port == port && resolved_host == hostname {
+                        continue;
                     }
-                    _ => {}
+
+                    let props = info.get_properties();
+
+                    // Filter foreign services by app name
+                    if props.get("app").map(|p| p.val_str()) != Some(APP_ID) {
+                        continue;
+                    }
+
+                    let username = props
+                        .get("username")
+                        .map(|p| p.val_str().to_owned())
+                        .unwrap_or_else(|| info.get_fullname().to_owned());
+
+                    let share_count: usize = props
+                        .get("share_count")
+                        .and_then(|p| p.val_str().parse::<usize>().ok())
+                        .unwrap_or(0);
+
+                    // FIX: prefer IPv4 but fall back to IPv6
+                    // get_addresses() returns &HashSet<ScopedIp>; ScopedIp wraps IpAddr
+                    // but does not implement Copy, so we call .into_addr() to unwrap it.
+                    let addr: Option<IpAddr> = info
+                        .get_addresses_v4()
+                        .into_iter()
+                        .next()
+                        .map(|a| IpAddr::V4(a))
+                        .or_else(|| {
+                            info.get_addresses()
+                                .iter()
+                                .find(|s| s.is_ipv6())
+                                .map(|s| s.to_ip_addr())
+                        });
+
+                    if let Some(addr) = addr {
+                        registry.upsert(addr, new_port, username, share_count);
+                    }
                 }
             }
         });
@@ -198,38 +207,39 @@ pub async fn run_mdns(
     }
 
     // -----------------------------------------------------------------------
-    // ANNOUNCER LOOP (ONLY PLACE THAT TOUCHES daemon.register!)
+    // ANNOUNCER — re-announce when share count changes or on heartbeat
+    // FIX: removed unused `last_count` variable that was assigned but never read.
+    // Now we track it properly to avoid unnecessary re-registers.
     // -----------------------------------------------------------------------
 
-    let mut last_count = 0;
+    let mut announced_count: Option<usize> = None;
 
     loop {
         tokio::time::sleep(Duration::from_secs(ANNOUNCE_INTERVAL_SECS)).await;
 
         let count = share_registry.list_available().len();
 
-        let fullname = format!("{}.{}", instance, SERVICE_TYPE);
+        // Re-register when count changed (or first time)
+        if announced_count != Some(count) {
+            let fullname = format!("{}.{}", instance, SERVICE_TYPE);
+            daemon.unregister(&fullname).ok();
 
-        // Always re-announce (refresh TTL)
-        daemon.unregister(&fullname).ok();
+            let props = build_props(&username, count);
 
-        let props = build_props(&username, count);
+            let service = ServiceInfo::new(
+                SERVICE_TYPE,
+                &instance,
+                &host,
+                "",
+                port,
+                Some(props),
+            )?
+            .enable_addr_auto();
 
-        let service = ServiceInfo::new(
-            SERVICE_TYPE,
-            &instance,
-            &host,
-            "",
-            port,
-            Some(props),
-        )?
-        .enable_addr_auto();
-
-        daemon.register(service)?;
-
-        last_count = count;
+            daemon.register(service)?;
+            announced_count = Some(count);
+        }
     }
-    
 }
 
 // ---------------------------------------------------------------------------
@@ -240,10 +250,8 @@ fn build_props(username: &str, share_count: usize) -> HashMap<String, String> {
     let mut m = HashMap::new();
     m.insert("username".to_owned(), username.to_owned());
     m.insert("share_count".to_owned(), share_count.to_string());
-
-    m.insert("app".to_owned(), "local_fileshare".to_owned());
-    m.insert("version".to_owned(), "1".to_owned()); // shouldnt be hardcoded, better use git hash etc.
-    
+    m.insert("app".to_owned(), APP_ID.to_owned());
+    m.insert("version".to_owned(), PROTOCOL_VERSION.to_owned());
     m
 }
 
@@ -252,7 +260,6 @@ fn sanitise_instance_name(name: &str) -> String {
         .chars()
         .map(|c| if c.is_alphanumeric() || c == '-' { c } else { '_' })
         .collect();
-
     s[..s.len().min(63)].to_owned()
 }
 

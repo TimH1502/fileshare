@@ -1,4 +1,4 @@
-use crate::client::{self, RemoteShareInfo};
+use crate::client::{self, DownloadResult, RemoteShareInfo};
 use crate::config::Config;
 use crate::discovery::{Peer, PeerRegistry};
 use crate::server::ServerEvent;
@@ -31,11 +31,13 @@ pub enum LogKind {
 
 #[derive(Debug, Clone)]
 pub struct DownloadState {
+    pub id: String,
     pub name: String,
     pub bytes_done: u64,
     pub total: u64,
     pub speed_bps: f64,
     pub done: bool,
+    pub done_at: Option<std::time::Instant>,
     pub error: Option<String>,
 }
 
@@ -46,21 +48,20 @@ pub struct ZipConfirmRequest {
     pub folder_name: String,
     pub file_count: usize,
     pub total_size: u64,
-    pub would_zip: bool,  // whether it exceeds the auto-zip threshold
+    pub would_zip: bool,
 }
 
 pub enum AppEvent {
     Tick,
     Key(crossterm::event::KeyEvent),
     PeerFilesLoaded(Vec<RemoteShareInfo>),
-    DownloadProgress(client::DownloadProgress),
-    DownloadDone(PathBuf),
-    DownloadError(String),
+    /// Progress update keyed by share id
+    DownloadProgress { id: String, progress: client::DownloadProgress },
+    DownloadDone { id: String, result: DownloadResult },
+    DownloadError { id: String, error: String },
     ServerEvent(ServerEvent),
     AddShare(PathBuf),
-    /// Folder dropped — needs user confirmation for zipping
     ZipConfirmNeeded(ZipConfirmRequest),
-    /// User confirmed: share path, zip=true/false
     ZipConfirmResult(PathBuf, bool),
     ShareAdded(crate::shares::SharedItem),
     ShareError(String),
@@ -80,17 +81,19 @@ pub struct App {
     pub my_shares_state: usize,
 
     pub log: Vec<LogEntry>,
-    pub active_download: Option<DownloadState>,
+    /// Active downloads keyed by share id — supports multiple simultaneous downloads
+    pub active_downloads: Vec<DownloadState>,
 
     pub show_help: bool,
     pub manual_ip_input: Option<String>,
     pub manual_path_input: Option<String>,
     pub status_message: Option<String>,
 
-    /// Pending zip confirmation dialog (shown when a folder is dropped)
     pub zip_confirm: Option<ZipConfirmRequest>,
 
     pub event_tx: mpsc::Sender<AppEvent>,
+
+    pub last_peer_refresh: std::time::Instant,
 }
 
 impl App {
@@ -111,13 +114,14 @@ impl App {
             peer_files_loading: false,
             my_shares_state: 0,
             log: vec![],
-            active_download: None,
+            active_downloads: vec![],
             show_help: false,
             manual_ip_input: None,
             manual_path_input: None,
             status_message: None,
             zip_confirm: None,
             event_tx,
+            last_peer_refresh: std::time::Instant::now(),
         }
     }
 
@@ -127,7 +131,6 @@ impl App {
             message: message.into(),
             kind,
         });
-        // Keep last 200 entries
         if self.log.len() > 200 {
             self.log.remove(0);
         }
@@ -176,7 +179,7 @@ impl App {
             return;
         }
 
-        // Manual path input mode (opened from MyShares with 'm')
+        // Manual path input mode
         if let Some(ref mut input) = self.manual_path_input {
             match key.code {
                 KeyCode::Char(c) => input.push(c),
@@ -184,10 +187,11 @@ impl App {
                 KeyCode::Enter => {
                     let path_str = input.clone();
                     self.manual_path_input = None;
-                    // Reuse the drag-and-drop path via AddShare event
                     let tx = self.event_tx.clone();
                     tokio::spawn(async move {
-                        tx.send(AppEvent::AddShare(std::path::PathBuf::from(path_str))).await.ok();
+                        tx.send(AppEvent::AddShare(std::path::PathBuf::from(path_str)))
+                            .await
+                            .ok();
                     });
                 }
                 KeyCode::Esc => {
@@ -234,23 +238,19 @@ impl App {
             KeyCode::Char('?') | KeyCode::Char('h') => {
                 self.show_help = !self.show_help;
             }
-            KeyCode::Char('m') => {
-                match self.focus {
-                    Focus::MyShares => {
-                        self.manual_path_input = Some(String::new());
-                    }
-                    _ => {
-                        self.manual_ip_input = Some(String::new());
-                    }
+            KeyCode::Char('m') => match self.focus {
+                Focus::MyShares => {
+                    self.manual_path_input = Some(String::new());
                 }
-            }
-            _ => {
-                match self.focus {
-                    Focus::PeerList => self.handle_peer_list_key(key),
-                    Focus::PeerFiles => self.handle_peer_files_key(key),
-                    Focus::MyShares => self.handle_my_shares_key(key),
+                _ => {
+                    self.manual_ip_input = Some(String::new());
                 }
-            }
+            },
+            _ => match self.focus {
+                Focus::PeerList => self.handle_peer_list_key(key),
+                Focus::PeerFiles => self.handle_peer_files_key(key),
+                Focus::MyShares => self.handle_my_shares_key(key),
+            },
         }
     }
 
@@ -365,10 +365,6 @@ impl App {
     }
 
     fn download_selected(&mut self) {
-        if self.active_download.is_some() {
-            self.log("A download is already in progress", LogKind::Warning);
-            return;
-        }
         let peer = match self.selected_peer() {
             Some(p) => p,
             None => return,
@@ -378,12 +374,23 @@ impl App {
             _ => return,
         };
 
-        self.active_download = Some(DownloadState {
+        // Check if this file is already downloading
+        if self.active_downloads.iter().any(|d| d.id == file.id && !d.done) {
+            self.log(
+                format!("'{}' is already downloading", file.name),
+                LogKind::Warning,
+            );
+            return;
+        }
+
+        self.active_downloads.push(DownloadState {
+            id: file.id.clone(),
             name: file.name.clone(),
             bytes_done: 0,
             total: file.size,
             speed_bps: 0.0,
             done: false,
+            done_at: None,
             error: None,
         });
 
@@ -392,20 +399,43 @@ impl App {
         let base_url = peer.http_base();
         let download_dir = self.config.download_dir.clone();
         let tx = self.event_tx.clone();
+        let file_id = file.id.clone();
 
         tokio::spawn(async move {
-            let (prog_tx, mut prog_rx) = mpsc::channel(32);
+            let (prog_tx, mut prog_rx) = tokio::sync::mpsc::channel(32);
             let tx2 = tx.clone();
+            let fid2 = file_id.clone();
 
             tokio::spawn(async move {
                 while let Some(p) = prog_rx.recv().await {
-                    tx2.send(AppEvent::DownloadProgress(p)).await.ok();
+                    tx2.send(AppEvent::DownloadProgress {
+                        id: fid2.clone(),
+                        progress: p,
+                    })
+                    .await
+                    .ok();
                 }
             });
 
-            match client::download_file(&base_url, &file.id, &file.name, &download_dir, prog_tx).await {
-                Ok(path) => { tx.send(AppEvent::DownloadDone(path)).await.ok(); }
-                Err(e) => { tx.send(AppEvent::DownloadError(e.to_string())).await.ok(); }
+            match client::download_file(&base_url, &file.id, &file.name, &download_dir, prog_tx)
+                .await
+            {
+                Ok(result) => {
+                    tx.send(AppEvent::DownloadDone {
+                        id: file_id,
+                        result,
+                    })
+                    .await
+                    .ok();
+                }
+                Err(e) => {
+                    tx.send(AppEvent::DownloadError {
+                        id: file_id,
+                        error: e.to_string(),
+                    })
+                    .await
+                    .ok();
+                }
             }
         });
     }
@@ -435,28 +465,52 @@ impl App {
                 self.peer_files = files;
                 self.peer_files_loading = false;
             }
-            AppEvent::DownloadProgress(p) => {
-                if let Some(ref mut dl) = self.active_download {
-                    dl.bytes_done = p.bytes_downloaded;
-                    dl.total = p.total_bytes;
-                    dl.speed_bps = p.speed_bps;
+            AppEvent::DownloadProgress { id, progress } => {
+                if let Some(dl) = self.active_downloads.iter_mut().find(|d| d.id == id) {
+                    dl.bytes_done = progress.bytes_downloaded;
+                    dl.total = progress.total_bytes;
+                    dl.speed_bps = progress.speed_bps;
                 }
             }
-            AppEvent::DownloadDone(path) => {
-                let name = self.active_download.as_ref().map(|d| d.name.clone());
-                self.active_download = None;
-                if let Some(name) = name {
+            AppEvent::DownloadDone { id, result } => {
+                if let Some(dl) = self.active_downloads.iter_mut().find(|d| d.id == id) {
+                    dl.done = true;
+                    dl.done_at = Some(std::time::Instant::now());
+                    // For very small/fast files total may still be 0 if no progress
+                    // events fired. Ensure the bar renders as 100% either way.
+                    if dl.total == 0 { dl.total = 1; }
+                    dl.bytes_done = dl.total; // show 100%
+                    let name = dl.name.clone();
+                    let checksum_note = match result.checksum_ok {
+                        Some(true) => " ✓ checksum ok",
+                        Some(false) => " ⚠ checksum MISMATCH",
+                        None => "",
+                    };
                     self.log(
-                        format!("✓ Downloaded '{}' → {}", name, path.display()),
-                        LogKind::Success,
+                        format!(
+                            "✓ Downloaded '{}' → {}{}",
+                            name,
+                            result.path.display(),
+                            checksum_note
+                        ),
+                        if result.checksum_ok == Some(false) {
+                            LogKind::Warning
+                        } else {
+                            LogKind::Success
+                        },
                     );
                 }
+                // Keep visible for 3s; Tick handler prunes old entries
             }
-            AppEvent::DownloadError(e) => {
-                if let Some(ref dl) = self.active_download {
-                    self.log(format!("✗ Download '{}' failed: {}", dl.name, e), LogKind::Warning);
+
+            AppEvent::DownloadError { id, error } => {
+                if let Some(dl) = self.active_downloads.iter().find(|d| d.id == id) {
+                    self.log(
+                        format!("✗ Download '{}' failed: {}", dl.name, error),
+                        LogKind::Warning,
+                    );
                 }
-                self.active_download = None;
+                self.active_downloads.retain(|d| d.id != id);
             }
             AppEvent::ServerEvent(ServerEvent::Downloaded { item_name, by_addr }) => {
                 self.log(
@@ -478,15 +532,25 @@ impl App {
                 let shares_c = self.shares.clone();
                 tokio::spawn(async move {
                     let etx2 = etx.clone();
-                    match shares_c.add_with_zip_choice(path, None, None, should_zip, move |folder_name| {
-                        let msg = format!("Zipping '{}' — this may take a moment…", folder_name);
-                        let etx2 = etx2.clone();
-                        tokio::spawn(async move {
-                            let _ = etx2.send(AppEvent::ZipStarted(msg)).await;
-                        });
-                    }) {
-                        Ok(item) => { etx.send(AppEvent::ShareAdded(item)).await.ok(); }
-                        Err(e) => { etx.send(AppEvent::ShareError(e.to_string())).await.ok(); }
+                    match shares_c.add_with_zip_choice(
+                        path,
+                        None,
+                        None,
+                        should_zip,
+                        move |folder_name| {
+                            let msg = format!("Zipping '{}' — this may take a moment…", folder_name);
+                            let etx2 = etx2.clone();
+                            tokio::spawn(async move {
+                                let _ = etx2.send(AppEvent::ZipStarted(msg)).await;
+                            });
+                        },
+                    ) {
+                        Ok(item) => {
+                            etx.send(AppEvent::ShareAdded(item)).await.ok();
+                        }
+                        Err(e) => {
+                            etx.send(AppEvent::ShareError(e.to_string())).await.ok();
+                        }
                     }
                 });
             }
@@ -495,6 +559,31 @@ impl App {
             }
             AppEvent::ShareError(e) => {
                 self.log(format!("✗ Share failed: {}", e), LogKind::Warning);
+            }
+
+            AppEvent::Tick => {
+                // Auto-refresh peer files every 3 seconds
+                if self.focus == Focus::PeerFiles {
+                    let now = std::time::Instant::now();
+                    let interval = std::time::Duration::from_secs(3);
+
+                    if now.duration_since(self.last_peer_refresh) >= interval {
+                        if !self.peer_files_loading && self.selected_peer().is_some() {
+                            self.load_peer_files();
+                            self.last_peer_refresh = now;
+                        }
+                    }
+                }
+
+                // Optional: cleanup finished downloads (you already hinted this exists)
+                self.active_downloads.retain(|d| {
+                    if d.done {
+                        if let Some(done_at) = d.done_at {
+                            return done_at.elapsed().as_secs() < 3;
+                        }
+                    }
+                    true
+                });
             }
             _ => {}
         }

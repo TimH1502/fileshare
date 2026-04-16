@@ -83,9 +83,7 @@ async fn download_file(
 ) -> Response {
     let item = match state.shares.get(&id) {
         Some(i) if i.is_available() => i,
-        Some(_) => {
-            return (StatusCode::GONE, "Share is no longer available").into_response()
-        }
+        Some(_) => return (StatusCode::GONE, "Share is no longer available").into_response(),
         None => return (StatusCode::NOT_FOUND, "Share not found").into_response(),
     };
 
@@ -98,32 +96,63 @@ async fn download_file(
         })
         .ok();
 
+    // FIX: plain unzipped Folder — path is a directory, can't File::open it.
+    // Zip it into a temp file on a blocking thread, then stream and clean up.
+    if matches!(item.kind, ShareKind::Folder) {
+        let folder_path = item.path.clone();
+        let folder_name = item.name.clone();
+        let checksum = item.checksum.clone();
+
+        let zip_result = tokio::task::spawn_blocking(move || {
+            let tmp = std::env::temp_dir()
+                .join(format!("fileshare_tmp_{}.zip", folder_name));
+            crate::shares::zip_folder_pub(&folder_path, &tmp)?;
+            Ok::<_, anyhow::Error>(tmp)
+        })
+        .await;
+
+        return match zip_result {
+            Ok(Ok(tmp_path)) => match tokio::fs::File::open(&tmp_path).await {
+                Ok(file) => {
+                    let size = tokio::fs::metadata(&tmp_path).await.map(|m| m.len()).unwrap_or(0);
+                    let stream = tokio_util::io::ReaderStream::new(file);
+                    let body = axum::body::Body::from_stream(stream);
+                    // Cleanup: the temp file is unlinked immediately; the OS keeps it
+                    // accessible through the open file handle until the stream finishes.
+                    tokio::fs::remove_file(&tmp_path).await.ok();
+                    Response::builder()
+                        .status(StatusCode::OK)
+                        .header(header::CONTENT_TYPE, "application/zip")
+                        .header(header::CONTENT_DISPOSITION,
+                            format!("attachment; filename=\"{}.zip\"", item.name))
+                        .header(header::CONTENT_LENGTH, size)
+                        .header("X-Checksum-SHA256", &checksum)
+                        .body(body)
+                        .unwrap()
+                }
+                Err(_) => (StatusCode::INTERNAL_SERVER_ERROR, "Failed to open temp zip").into_response(),
+            },
+            _ => (StatusCode::INTERNAL_SERVER_ERROR, "Failed to zip folder").into_response(),
+        };
+    }
+
     match tokio::fs::File::open(&item.path).await {
         Ok(file) => {
             let stream = tokio_util::io::ReaderStream::new(file);
             let body = axum::body::Body::from_stream(stream);
 
-            let content_type = if matches!(item.kind, ShareKind::ZippedFolder) {
-                "application/zip".to_string()
+            let (content_type, filename) = if matches!(item.kind, ShareKind::ZippedFolder) {
+                ("application/zip".to_string(), format!("{}.zip", item.name))
             } else {
-                mime_guess::from_path(&item.path)
-                    .first_or_octet_stream()
-                    .to_string()
-            };
-
-            let filename = if matches!(item.kind, ShareKind::ZippedFolder) {
-                format!("{}.zip", item.name)
-            } else {
-                item.name.clone()
+                (mime_guess::from_path(&item.path).first_or_octet_stream().to_string(),
+                 item.name.clone())
             };
 
             Response::builder()
                 .status(StatusCode::OK)
                 .header(header::CONTENT_TYPE, content_type)
-                .header(
-                    header::CONTENT_DISPOSITION,
-                    format!("attachment; filename=\"{}\"", filename),
-                )
+                .header(header::CONTENT_DISPOSITION,
+                    format!("attachment; filename=\"{}\"", filename))
                 .header(header::CONTENT_LENGTH, item.size)
                 .header("X-Checksum-SHA256", &item.checksum)
                 .body(body)
@@ -142,6 +171,7 @@ async fn serve_browser_ui(State(state): State<Arc<AppState>>) -> axum::response:
             ShareKind::Folder => "📁",
             ShareKind::ZippedFolder => "🗜️",
         };
+        // FIX: item.id is now escaped even though nanoid produces safe chars
         rows.push_str(&format!(
             r#"<tr>
                 <td>{} {}</td>
@@ -153,7 +183,7 @@ async fn serve_browser_ui(State(state): State<Arc<AppState>>) -> axum::response:
             html_escape(&item.name),
             item.size_human(),
             item.download_count,
-            item.id
+            html_escape(&item.id),  // FIX: escape id in href
         ));
     }
 
@@ -193,7 +223,9 @@ fn html_escape(s: &str) -> String {
         .replace('"', "&quot;")
 }
 
-pub fn build_router_with_connect_info(state: Arc<AppState>) -> axum::extract::connect_info::IntoMakeServiceWithConnectInfo<Router, std::net::SocketAddr> {
+pub fn build_router_with_connect_info(
+    state: Arc<AppState>,
+) -> axum::extract::connect_info::IntoMakeServiceWithConnectInfo<Router, std::net::SocketAddr> {
     Router::new()
         .route("/", get(serve_browser_ui))
         .route("/shares", get(list_shares))

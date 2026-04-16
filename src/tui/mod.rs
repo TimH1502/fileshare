@@ -156,6 +156,8 @@ pub async fn run(
     // We're accumulating a path burst when this is true — suppress normal key handling
     let mut accumulating = false;
 
+    let tick_rate = std::time::Duration::from_millis(250);
+
     loop {
         // Check if the debounce timer has expired — flush pending path buffer
         if let Some(t) = last_key_time {
@@ -183,6 +185,13 @@ pub async fn run(
         tokio::select! {
             _ = tick.tick() => {
                 app.shares.prune_expired();
+                // Prune downloads that finished more than 5 seconds ago
+                // (longer window so fast small-file downloads stay visible)
+                app.active_downloads.retain(|d| {
+                    d.done_at.map(|t| t.elapsed().as_secs() < 5).unwrap_or(true)
+                });
+
+                let _ = event_tx.send(AppEvent::Tick).await; // send tick for auto file refresh 
             }
 
             Some(Ok(event)) = crossterm_events.next() => {
@@ -207,6 +216,19 @@ pub async fn run(
                         // Ctrl+C always quits
                         if key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL) {
                             break;
+                        }
+
+                        if key.code == KeyCode::Char('v') && key.modifiers.contains(KeyModifiers::CONTROL) {
+                                if let Ok(mut clipboard) = arboard::Clipboard::new() {
+                                    if let Ok(text) = clipboard.get_text() {
+                                        path_buf.clear();
+                                        last_key_time = None;
+                                        accumulating = false;
+
+                                        try_share_path(&text, &shares, &event_tx);
+                                    }
+                                }
+                                continue;
                         }
 
                         match key.code {

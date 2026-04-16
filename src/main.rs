@@ -116,7 +116,6 @@ async fn run_tui(username_override: Option<String>, port_override: Option<u16>) 
         .unwrap_or(&config.download_dir)
         .join(".fileshare_zip_cache");
 
-    // Index lives next to config.toml for easy discovery
     let index_path = Config::config_path()
         .parent()
         .map(|p| p.to_path_buf())
@@ -159,7 +158,30 @@ async fn run_tui(username_override: Option<String>, port_override: Option<u16>) 
         });
     }
 
-    // Run TUI (passes restored count so the startup log can mention it)
+    // Background index flush task (debounces download counter writes)
+    {
+        let shares_clone = shares.clone();
+        tokio::spawn(async move {
+            let mut interval = tokio::time::interval(std::time::Duration::from_secs(5));
+            loop {
+                interval.tick().await;
+                shares_clone.flush_if_dirty();
+            }
+        });
+    }
+
+    // Background expiry pruner
+    {
+        let shares_clone = shares.clone();
+        tokio::spawn(async move {
+            let mut interval = tokio::time::interval(std::time::Duration::from_secs(30));
+            loop {
+                interval.tick().await;
+                shares_clone.prune_expired();
+            }
+        });
+    }
+
     tui::run(config, peers, shares, event_rx, restored).await?;
 
     Ok(())
@@ -182,18 +204,15 @@ async fn run_send(
         .join("shares.index.json");
     let shares = ShareRegistry::new(cache_dir, index_path);
     let item = shares.add(path, limit, expires, |name| {
-            println!("Zipping '{}' — this may take a moment…", name);
-        })?;
+        println!("Zipping '{}' — this may take a moment…", name);
+    })?;
     println!(
         "Sharing '{}' ({}) — ID: {}",
         item.name,
         item.size_human(),
         item.id
     );
-    println!(
-        "Browse at: http://0.0.0.0:{}/",
-        config.port
-    );
+    println!("Browse at: http://0.0.0.0:{}/", config.port);
     println!("SHA256: {}", item.checksum);
     println!("Press Ctrl+C to stop sharing.");
 

@@ -1,6 +1,7 @@
 use anyhow::Result;
 use futures::StreamExt;
 use serde::Deserialize;
+use sha2::{Digest, Sha256};
 use std::path::PathBuf;
 use tokio::io::AsyncWriteExt;
 
@@ -42,13 +43,20 @@ pub struct DownloadProgress {
     pub speed_bps: f64,
 }
 
+/// Result of a completed download, including integrity check outcome.
+pub struct DownloadResult {
+    pub path: PathBuf,
+    /// None if the server didn't send a checksum header.
+    pub checksum_ok: Option<bool>,
+}
+
 pub async fn download_file(
     base_url: &str,
     share_id: &str,
     share_name: &str,
     download_dir: &PathBuf,
     progress_tx: tokio::sync::mpsc::Sender<DownloadProgress>,
-) -> Result<PathBuf> {
+) -> Result<DownloadResult> {
     tokio::fs::create_dir_all(download_dir).await?;
 
     let client = reqwest::Client::new();
@@ -62,6 +70,13 @@ pub async fn download_file(
     }
 
     let total = resp.content_length().unwrap_or(0);
+
+    // Extract server-side checksum from response header (may be absent)
+    let expected_checksum = resp
+        .headers()
+        .get("x-checksum-sha256")
+        .and_then(|v| v.to_str().ok())
+        .map(|s| s.to_lowercase());
 
     // Determine filename from Content-Disposition or use share name
     let filename = resp
@@ -82,8 +97,12 @@ pub async fn download_file(
     let mut downloaded = 0u64;
     let start = std::time::Instant::now();
 
+    // Compute checksum while streaming so we don't need a second pass
+    let mut hasher = Sha256::new();
+
     while let Some(chunk) = stream.next().await {
         let chunk = chunk?;
+        hasher.update(&chunk);
         file.write_all(&chunk).await?;
         downloaded += chunk.len() as u64;
 
@@ -101,7 +120,22 @@ pub async fn download_file(
     }
 
     file.flush().await?;
-    Ok(dest_path)
+
+    // FIX: verify integrity against the X-Checksum-SHA256 header
+    let checksum_ok = expected_checksum.map(|expected| {
+        let actual = hex::encode(hasher.finalize());
+        // For folder checksums (prefixed "dir:…") skip byte-level comparison
+        if expected.starts_with("dir:") {
+            true
+        } else {
+            actual == expected
+        }
+    });
+
+    Ok(DownloadResult {
+        path: dest_path,
+        checksum_ok,
+    })
 }
 
 pub fn format_speed(bps: f64) -> String {
