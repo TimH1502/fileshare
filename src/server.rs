@@ -200,15 +200,80 @@ async fn serve_browser_ui(State(state): State<Arc<AppState>>) -> axum::response:
     td {{ padding: 8px; border-bottom: 1px solid #21262d; }}
     a {{ color: #58a6ff; text-decoration: none; }}
     a:hover {{ text-decoration: underline; }}
+    #status {{ font-size: 0.75em; color: #8b949e; float: right; margin-top: 6px; }}
+    #status.ok::before {{ content: "● "; color: #3fb950; }}
+    #status.err::before {{ content: "● "; color: #f85149; }}
   </style>
 </head>
 <body>
-  <h1>📡 {username}'s files</h1>
+  <h1>📡 {username}'s files <span id="status" class="ok">live</span></h1>
   <p style="color:#8b949e">Install <code>fileshare</code> for a better experience. Or download directly:</p>
   <table>
     <thead><tr><th>Name</th><th>Size</th><th>Downloads</th><th></th></tr></thead>
-    <tbody>{rows}</tbody>
+    <tbody id="shares-body">{rows}</tbody>
   </table>
+  <script>
+    const INTERVAL_MS = 4000;
+    const tbody = document.getElementById('shares-body');
+    const status = document.getElementById('status');
+    let lastJson = '';
+    let timer = null;
+
+    function iconFor(kind) {{
+      if (kind === 'file') return '📄';
+      if (kind === 'folder') return '📁';
+      return '🗜️';
+    }}
+
+    function escHtml(s) {{
+      return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+    }}
+
+    function renderRows(items) {{
+      if (!items.length) {{
+        return '<tr><td colspan="4" style="color:#8b949e">No files shared yet.</td></tr>';
+      }}
+      return items.map(item => `
+        <tr>
+          <td>${{iconFor(item.kind)}} ${{escHtml(item.name)}}</td>
+          <td>${{escHtml(item.size_human)}}</td>
+          <td>${{item.download_count}}</td>
+          <td><a href="/download/${{escHtml(item.id)}}" download>Download</a></td>
+        </tr>`).join('');
+    }}
+
+    function setStatus(ok, text) {{
+      status.className = ok ? 'ok' : 'err';
+      status.textContent = text;
+    }}
+
+    async function poll() {{
+      if (document.hidden) return;
+      try {{
+        const res = await fetch('/shares');
+        if (!res.ok) throw new Error('HTTP ' + res.status);
+        const data = await res.json();
+        const json = JSON.stringify(data.items);
+        if (json !== lastJson) {{
+          lastJson = json;
+          tbody.innerHTML = renderRows(data.items);
+        }}
+        const now = new Date().toLocaleTimeString();
+        setStatus(true, 'live · ' + now);
+      }} catch (e) {{
+        setStatus(false, 'offline');
+      }}
+    }}
+
+    // Pause when tab is hidden, resume immediately on focus
+    document.addEventListener('visibilitychange', () => {{
+      if (!document.hidden) poll();
+    }});
+
+    // Start polling
+    poll();
+    timer = setInterval(poll, INTERVAL_MS);
+  </script>
 </body>
 </html>"#,
         username = html_escape(&state.username),
