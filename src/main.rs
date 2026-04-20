@@ -133,6 +133,7 @@ async fn run_tui(username_override: Option<String>, port_override: Option<u16>) 
         shares: shares.clone(),
         username: config.username.clone(),
         event_tx: event_tx.clone(),
+        download_dir: config.download_dir.clone(),
     });
 
     // Start HTTP server
@@ -221,6 +222,7 @@ async fn run_send(
         shares,
         username: config.username.clone(),
         event_tx,
+        download_dir: config.download_dir.clone(),
     });
 
     let addr: SocketAddr = format!("0.0.0.0:{}", config.port).parse()?;

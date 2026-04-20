@@ -518,6 +518,12 @@ impl App {
                     LogKind::Download,
                 );
             }
+            AppEvent::ServerEvent(ServerEvent::Uploaded { item_name, by_addr }) => {
+                self.log(
+                    format!("⬆ '{}' uploaded by {}", item_name, by_addr),
+                    LogKind::Success,
+                );
+            }
             AppEvent::ShareAdded(item) => {
                 self.log(
                     format!("+ Sharing '{}' ({})", item.name, item.size_human()),
