@@ -85,6 +85,7 @@ pub struct App {
     pub active_downloads: Vec<DownloadState>,
 
     pub show_help: bool,
+    pub show_qr: bool,
     pub manual_ip_input: Option<String>,
     pub manual_path_input: Option<String>,
     pub status_message: Option<String>,
@@ -116,6 +117,7 @@ impl App {
             log: vec![],
             active_downloads: vec![],
             show_help: false,
+            show_qr: false,
             manual_ip_input: None,
             manual_path_input: None,
             status_message: None,
@@ -151,6 +153,17 @@ impl App {
 
     pub fn handle_key(&mut self, key: crossterm::event::KeyEvent) {
         use crossterm::event::KeyCode;
+
+        // QR overlay — Esc or r closes it
+        if self.show_qr {
+            match key.code {
+                KeyCode::Esc | KeyCode::Char('r') | KeyCode::Char('q') => {
+                    self.show_qr = false;
+                }
+                _ => {}
+            }
+            return;
+        }
 
         // Zip-confirm popup takes priority
         if let Some(ref req) = self.zip_confirm.clone() {
@@ -237,6 +250,10 @@ impl App {
             }
             KeyCode::Char('?') | KeyCode::Char('h') => {
                 self.show_help = !self.show_help;
+            }
+            KeyCode::Char('r') => {
+                self.show_qr = !self.show_qr;
+                self.show_help = false;
             }
             KeyCode::Char('m') => match self.focus {
                 Focus::MyShares => {

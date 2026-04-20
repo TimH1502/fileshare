@@ -1,5 +1,6 @@
 use crate::shares::ShareKind;
 use crate::tui::app::{App, DownloadState, Focus, LogKind, ZipConfirmRequest};
+use qrcode::QrCode;
 use ratatui::{
     layout::{Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
@@ -44,6 +45,9 @@ pub fn draw(f: &mut Frame, app: &App) {
     if app.show_help {
         draw_help_overlay(f, area);
     }
+    if app.show_qr {
+        draw_qr_overlay(f, app, area);
+    }
     if app.manual_ip_input.is_some() {
         draw_manual_ip_overlay(f, app, area);
     }
@@ -72,6 +76,7 @@ fn draw_title_bar(f: &mut Frame, app: &App, area: Rect) {
         ),
         Span::styled("  │  ", Style::default().fg(DIM)),
         Span::styled("? help", Style::default().fg(DIM)),
+        Span::styled("  r qr", Style::default().fg(DIM)),
     ]);
     let bar = Paragraph::new(title).style(Style::default().bg(Color::Rgb(15, 20, 30)));
     f.render_widget(bar, area);
@@ -538,6 +543,7 @@ fn draw_status_bar(f: &mut Frame, app: &App, area: Rect) {
     let mut spans = vec![Span::styled(" [Tab] switch panel  ", Style::default().fg(DIM))];
     spans.extend(context_hints);
     spans.push(Span::styled("[?] help  ", Style::default().fg(DIM)));
+    spans.push(Span::styled("[r] qr code  ", Style::default().fg(DIM)));
     spans.push(Span::styled("[q] quit  ", Style::default().fg(DIM)));
     spans.push(Span::styled(format!("  DL→ {}", dl_dir), Style::default().fg(DIM)));
 
@@ -607,6 +613,7 @@ fn draw_help_overlay(f: &mut Frame, area: Rect) {
         )),
         Line::from(""),
         Line::from(Span::styled("  ?                 Toggle this help", Style::default().fg(DIM))),
+        Line::from(Span::styled("  r                 Show QR code for web UI", Style::default().fg(DIM))),
         Line::from(Span::styled("  q / Ctrl+C        Quit", Style::default().fg(DIM))),
     ];
 
@@ -758,6 +765,121 @@ fn draw_zip_confirm_overlay(f: &mut Frame, req: &ZipConfirmRequest, area: Rect) 
         .style(Style::default().bg(Color::Rgb(10, 15, 25)));
 
     f.render_widget(Paragraph::new(text).block(block), popup);
+}
+
+/// Best-effort: find the first non-loopback IPv4 address on this machine.
+/// Falls back to "127.0.0.1" so callers never get an empty string.
+fn local_ipv4() -> String {
+    // Walk every network interface, pick the first non-loopback IPv4 addr.
+    // We use std::net::UdpSocket trick: connect to a public IP (no packet
+    // is actually sent) and read back which local address the OS chose.
+    if let Ok(sock) = std::net::UdpSocket::bind("0.0.0.0:0") {
+        if sock.connect("8.8.8.8:80").is_ok() {
+            if let Ok(addr) = sock.local_addr() {
+                let ip = addr.ip().to_string();
+                if ip != "0.0.0.0" {
+                    return ip;
+                }
+            }
+        }
+    }
+    "127.0.0.1".to_string()
+}
+
+fn draw_qr_overlay(f: &mut Frame, app: &App, area: Rect) {
+    let url = format!("http://{}:{}/", local_ipv4(), app.config.port);
+
+    // Generate QR matrix
+    let code = match QrCode::new(url.as_bytes()) {
+        Ok(c) => c,
+        Err(_) => return,
+    };
+
+    let matrix = code.to_colors(); // Vec<qrcode::Color> row-major
+    let qr_size = code.width();    // modules per side
+
+    // Render using half-block chars: each char covers 2 vertical modules.
+    // Upper module = top half (▀), lower = bottom half, both = █, neither = space.
+    // We add a 1-module quiet zone padding on all sides.
+    let pad = 1usize;
+    let padded = qr_size + pad * 2;
+    let char_rows = (padded + 1) / 2; // ceiling div — last row may be half
+
+    // Build lines
+    let mut lines: Vec<Line> = Vec::with_capacity(char_rows + 4);
+
+    // Header
+    lines.push(Line::from(Span::styled(
+        " Scan to open web UI ",
+        Style::default().fg(ACCENT).add_modifier(Modifier::BOLD),
+    )));
+    lines.push(Line::from(Span::styled(
+        format!(" {}", url),
+        Style::default().fg(Color::White),
+    )));
+    lines.push(Line::from(""));
+
+    let is_dark = |row: isize, col: isize| -> bool {
+        // out-of-bounds (padding) = light
+        let r = row - pad as isize;
+        let c = col - pad as isize;
+        if r < 0 || c < 0 || r >= qr_size as isize || c >= qr_size as isize {
+            return false;
+        }
+        matrix[r as usize * qr_size + c as usize] == qrcode::Color::Dark
+    };
+
+    for char_row in 0..char_rows {
+        let top_mod = (char_row * 2) as isize;
+        let bot_mod = top_mod + 1;
+
+        let mut spans: Vec<Span> = vec![Span::raw(" ")]; // left margin
+        for col in 0..padded {
+            let c = col as isize;
+            let top = is_dark(top_mod, c);
+            let bot = is_dark(bot_mod, c);
+            // Half-block trick: each terminal cell represents 2 vertical QR modules.
+            // We use a white-on-black palette: dark module = white, light = black bg.
+            // Top module → foreground, Bottom module → background (via lower-half block).
+            let (fg, bg, ch) = match (top, bot) {
+                (true,  true)  => (Color::White, Color::Black, "█"), // both dark
+                (true,  false) => (Color::White, Color::Black, "▀"), // top dark, bottom light
+                (false, true)  => (Color::Black, Color::White, "▀"), // top light, bottom dark (inverted)
+                (false, false) => (Color::Black, Color::Black, " "), // both light
+            };
+            spans.push(Span::styled(ch, Style::default().fg(fg).bg(bg)));
+        }
+        lines.push(Line::from(spans));
+    }
+
+    lines.push(Line::from(""));
+    lines.push(Line::from(Span::styled(
+        " [r / Esc] close ",
+        Style::default().fg(DIM),
+    )));
+
+    // Size the popup to the QR + chrome
+    let popup_w = (padded as u16 + 3).min(area.width);  // +3 = margins
+    let popup_h = (lines.len() as u16 + 2).min(area.height); // +2 = border
+    let x = area.width.saturating_sub(popup_w) / 2;
+    let y = area.height.saturating_sub(popup_h) / 2;
+    let popup = Rect::new(x, y, popup_w, popup_h);
+
+    f.render_widget(Clear, popup);
+
+    let block = Block::default()
+        .title(Span::styled(
+            " 📱 QR Code ",
+            Style::default().fg(ACCENT).add_modifier(Modifier::BOLD),
+        ))
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(ACCENT))
+        .style(Style::default().bg(Color::Rgb(10, 15, 25)));
+
+    let para = Paragraph::new(lines)
+        .block(block)
+        .wrap(Wrap { trim: false });
+    f.render_widget(para, popup);
 }
 
 fn truncate(s: &str, max: usize) -> String {
