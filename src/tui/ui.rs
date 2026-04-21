@@ -17,13 +17,13 @@ const DOWNLOAD_COLOR: Color = Color::Magenta;
 const SELECTED_BG: Color = Color::Rgb(30, 50, 60);
 
 pub fn draw(f: &mut Frame, app: &App) {
-    let area = f.size();
+    let area = f.area();
 
     let transfer_count = app.active_downloads.len() + app.active_uploads.len();
     // Always allocate at least 5 rows for the transfer panel so layout
     // doesn't jump when a fast transfer starts and immediately finishes.
     // Cap at 3 simultaneous entries (10 rows) to leave room for the log.
-    let dl_height = (transfer_count as u16 * 3 + 2).max(5).min(11);
+    let dl_height = (transfer_count as u16 * 3 + 2).clamp(5, 11);
 
     let root = Layout::default()
         .direction(Direction::Vertical)
@@ -675,7 +675,7 @@ fn draw_manual_ip_overlay(f: &mut Frame, app: &App, area: Rect) {
 }
 
 fn draw_manual_path_overlay(f: &mut Frame, app: &App, area: Rect) {
-    let w = (area.width).min(70).max(52);
+    let w =(area.width).clamp(52, 70);
     let h = 7u16;
     let x = area.width.saturating_sub(w) / 2;
     let y = area.height.saturating_sub(h) / 2;
@@ -820,7 +820,7 @@ fn draw_qr_overlay(f: &mut Frame, app: &App, area: Rect) {
     // We add a 1-module quiet zone padding on all sides.
     let pad = 1usize;
     let padded = qr_size + pad * 2;
-    let char_rows = (padded + 1) / 2; // ceiling div — last row may be half
+    let char_rows = padded.div_ceil(2); // ceiling div — last row may be half
 
     // Build lines
     let mut lines: Vec<Line> = Vec::with_capacity(char_rows + 4);

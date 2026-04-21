@@ -344,7 +344,7 @@ impl ShareRegistry {
         let name = path.file_name().unwrap().to_string_lossy().to_string();
         let expires_at =
             expires_in_mins.map(|m| Utc::now() + chrono::Duration::minutes(m as i64));
-        let (file_count, _, total_size) = analyse_folder_full(&path);
+        let (_file_count, _, total_size) = analyse_folder_full(&path);
 
         let (final_path, kind, size, checksum) = if should_zip {
             on_zipping(&name);

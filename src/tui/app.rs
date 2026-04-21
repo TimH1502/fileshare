@@ -38,7 +38,6 @@ pub struct DownloadState {
     pub speed_bps: f64,
     pub done: bool,
     pub done_at: Option<std::time::Instant>,
-    pub error: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -50,7 +49,6 @@ pub struct UploadState {
     pub speed_bps: f64,
     pub done: bool,
     pub done_at: Option<std::time::Instant>,
-    pub started_at: std::time::Instant,
     pub last_bytes: u64,  // for speed calculation
     pub last_tick: std::time::Instant,
 }
@@ -67,7 +65,6 @@ pub struct ZipConfirmRequest {
 
 pub enum AppEvent {
     Tick,
-    Key(crossterm::event::KeyEvent),
     PeerFilesLoaded(Vec<RemoteShareInfo>),
     /// Progress update keyed by share id
     DownloadProgress { id: String, progress: client::DownloadProgress },
@@ -104,7 +101,6 @@ pub struct App {
     pub show_qr: bool,
     pub manual_ip_input: Option<String>,
     pub manual_path_input: Option<String>,
-    pub status_message: Option<String>,
 
     pub zip_confirm: Option<ZipConfirmRequest>,
 
@@ -137,7 +133,6 @@ impl App {
             show_qr: false,
             manual_ip_input: None,
             manual_path_input: None,
-            status_message: None,
             zip_confirm: None,
             event_tx,
             last_peer_refresh: std::time::Instant::now(),
@@ -425,7 +420,6 @@ impl App {
             speed_bps: 0.0,
             done: false,
             done_at: None,
-            error: None,
         });
 
         self.log(format!("Downloading '{}'…", file.name), LogKind::Info);
@@ -591,7 +585,6 @@ impl App {
                         speed_bps: 0.0,
                         done: total > 0 && bytes_sent >= total,
                         done_at: if total > 0 && bytes_sent >= total { Some(now) } else { None },
-                        started_at: now,
                         last_bytes: bytes_sent,
                         last_tick: now,
                     });
@@ -659,12 +652,11 @@ impl App {
                     let now = std::time::Instant::now();
                     let interval = std::time::Duration::from_secs(3);
 
-                    if now.duration_since(self.last_peer_refresh) >= interval {
-                        if !self.peer_files_loading && self.selected_peer().is_some() {
+                    if now.duration_since(self.last_peer_refresh) >= interval
+                        && !self.peer_files_loading && self.selected_peer().is_some() {
                             self.load_peer_files();
                             self.last_peer_refresh = now;
                         }
-                    }
                 }
 
                 // Cleanup finished downloads and uploads after 5 seconds visible

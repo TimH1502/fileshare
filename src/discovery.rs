@@ -144,45 +144,42 @@ pub async fn run_mdns(
         let hostname = host.clone();
         std::thread::spawn(move || {
             for event in receiver {
-                match event {
-                    ServiceEvent::ServiceResolved(info) => {
-                        let new_port = info.get_port();
-                        let resolved_host = info.get_hostname();
+                if let ServiceEvent::ServiceResolved(info) = event {
+                    let new_port = info.get_port();
+                    let resolved_host = info.get_hostname();
 
-                        // FILTER YOURSELF HERE
-                        if new_port == port && resolved_host == hostname {
-                            continue;
-                        }
-
-                        let props = info.get_properties();
-
-                        // FILTER foreign services
-                        if props.get("app").map(|p| p.val_str()) != Some(APP_ID) {
-                            continue;
-                        }
-
-                        let username = info
-                            .get_properties()
-                            .get("username")
-                            .map(|p| p.val_str().to_owned())
-                            .unwrap_or_else(|| info.get_fullname().to_owned());
-
-                        let share_count: usize = info
-                            .get_properties()
-                            .get("share_count")
-                            .and_then(|p| p.val_str().parse::<usize>().ok())
-                            .unwrap_or(0);
-
-                        if let Some(addr) = info
-                            .get_addresses_v4()
-                            .into_iter()
-                            .next()
-                            .map(|a| IpAddr::V4(a))
-                        {
-                            registry.upsert(addr, new_port, username, share_count);
-                        }
+                    // FILTER YOURSELF HERE
+                    if new_port == port && resolved_host == hostname {
+                        continue;
                     }
-                    _ => {}
+
+                    let props = info.get_properties();
+
+                    // FILTER foreign services
+                    if props.get("app").map(|p| p.val_str()) != Some(APP_ID) {
+                        continue;
+                    }
+
+                    let username = info
+                        .get_properties()
+                        .get("username")
+                        .map(|p| p.val_str().to_owned())
+                        .unwrap_or_else(|| info.get_fullname().to_owned());
+
+                    let share_count: usize = info
+                        .get_properties()
+                        .get("share_count")
+                        .and_then(|p| p.val_str().parse::<usize>().ok())
+                        .unwrap_or(0);
+
+                    if let Some(addr) = info
+                        .get_addresses_v4()
+                        .into_iter()
+                        .next()
+                        .map(IpAddr::V4)
+                    {
+                        registry.upsert(addr, new_port, username, share_count);
+                    }
                 }
             }
         });
@@ -205,8 +202,6 @@ pub async fn run_mdns(
     // -----------------------------------------------------------------------
     // ANNOUNCER LOOP (ONLY PLACE THAT TOUCHES daemon.register!)
     // -----------------------------------------------------------------------
-
-    let mut last_count = 0;
 
     loop {
         tokio::time::sleep(Duration::from_secs(ANNOUNCE_INTERVAL_SECS)).await;
@@ -232,7 +227,6 @@ pub async fn run_mdns(
 
         daemon.register(service)?;
 
-        last_count = count;
     }
     
 }

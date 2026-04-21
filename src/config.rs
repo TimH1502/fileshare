@@ -64,7 +64,7 @@ impl Config {
     pub fn default_download_dir() -> PathBuf {
         let dirs_result = dirs::download_dir();
         debug_log(&format!("dirs::download_dir() = {:?}", dirs_result));
-        let mut dir = dirs_result.unwrap_or_else(|| {
+        let dir = dirs_result.unwrap_or_else(|| {
             let cwd = std::env::current_dir()
                 .unwrap_or_else(|_| PathBuf::from("."));
             debug_log(&format!("download_dir fallback → cwd = {:?}", cwd));

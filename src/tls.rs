@@ -33,7 +33,7 @@ pub async fn load_or_generate() -> Result<RustlsConfig> {
 
 fn generate_and_save(cert_path: &PathBuf, key_path: &PathBuf) -> Result<()> {
     use rcgen::{CertificateParams, DistinguishedName, DnType, KeyPair, SanType};
-    use std::time::{Duration, SystemTime};
+    
 
     let mut params = CertificateParams::new(vec!["fileshare.local".to_string()])?;
 

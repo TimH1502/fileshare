@@ -30,7 +30,7 @@ fn deduplicate_path(s: &str) -> String {
     // Windows Terminal drag-and-drop duplicates every character: "CC:\\UUsseerrss\\"
     // Detect by checking if every char pair is identical, then collapse.
     let chars: Vec<char> = s.chars().collect();
-    if chars.len() >= 4 && chars.len() % 2 == 0 {
+    if chars.len() >= 4 && chars.len().is_multiple_of(2) {
         let all_doubled = chars.chunks(2).all(|c| c[0] == c[1]);
         if all_doubled {
             return chars.iter().step_by(2).collect();
@@ -157,7 +157,7 @@ pub async fn run(
     // We're accumulating a path burst when this is true — suppress normal key handling
     let mut accumulating = false;
 
-    let tick_rate = std::time::Duration::from_millis(250);
+    let _tick_rate = std::time::Duration::from_millis(250);
 
     loop {
         // Check if the debounce timer has expired — flush pending path buffer
@@ -215,13 +215,12 @@ pub async fn run(
                         let in_input_mode = app.manual_ip_input.is_some()
                             || app.manual_path_input.is_some()
                             || app.zip_confirm.is_some();
-                        if !accumulating && !in_input_mode {
-                            if key.code == KeyCode::Char('q')
-                                || (key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL))
+                        if !accumulating && !in_input_mode
+                            && (key.code == KeyCode::Char('q')
+                                || (key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL)))
                             {
                                 break;
                             }
-                        }
 
                         // Ctrl+C always quits
                         if key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL) {

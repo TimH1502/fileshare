@@ -12,15 +12,11 @@ pub struct RemoteShareInfo {
     pub kind: String,
     pub size: u64,
     pub size_human: String,
-    pub checksum: String,
-    pub added_at: String,
-    pub download_count: u32,
     pub available: bool,
 }
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct ListResponse {
-    pub username: String,
     pub items: Vec<RemoteShareInfo>,
 }
 
