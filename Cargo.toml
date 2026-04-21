@@ -1,6 +1,6 @@
 [package]
 name = "fileshare"
-version = "0.1.0"
+version = "1.0.5"
 edition = "2021"
 description = "A local network file sharing CLI tool"
 
@@ -9,35 +9,57 @@ name = "fileshare"
 path = "src/main.rs"
 
 [dependencies]
-tokio = { version = "1", features = ["full"] }
-axum = { version = "0.8", features = ["multipart"] }
+# Async runtime
+tokio = { version = "1", default-features = false, features = ["rt-multi-thread", "macros", "fs", "io-util", "net", "time"] }
+tokio-util = { version = "0.7", default-features = false, features = ["io"] }
+futures = { version = "0.3", default-features = false }
+bytes = { version = "1", default-features = false }
+
+# Web server / HTTP
+axum = { version = "0.8", default-features = false, features = ["multipart", "tokio", "json"] }
+axum-extra = { version = "0.12", default-features = false, features = ["typed-header"] }
+axum-server = { version = "0.8", default-features = false, features = ["tls-rustls"] }
+tower-http = { version = "0.6", default-features = false, features = ["fs", "cors"] }
 reqwest = { version = "0.13", default-features = false, features = ["rustls", "stream", "json"] }
-serde = { version = "1", features = ["derive"] }
-serde_json = "1"
-toml = "1.1"
-clap = { version = "4", features = ["derive"] }
-ratatui = "0.30"
-crossterm = { version = "0.29", features = ["event-stream"] }
-indicatif = "0.18"
-sha2 = "0.11"
-hex = "0.4"
-uuid = { version = "1", features = ["v4"] }
-chrono = { version = "0.4", features = ["serde"] }
-walkdir = "2"
-zip = "8.5"
-tower-http = { version = "0.6", features = ["fs", "cors"] }
-tokio-util = { version = "0.7", features = ["io"] }
-futures = "0.3"
-dirs = "6"
-anyhow = "1"
-mdns-sd = "0.19"
-hostname = "0.4"
-socket2 = "0.6"
-bytes = "1"
-axum-extra = { version = "0.12", features = ["typed-header"] }
-mime_guess = "2"
-nanoid = "0.5"
-arboard = "3"
-qrcode = "0.14"
-rcgen = "0.14"
-axum-server = { version = "0.8", features = ["tls-rustls"] }
+mime_guess = { version = "2", default-features = false }
+
+# TLS / Certificates
+rcgen = { version = "0.14", default-features = false, features = ["crypto", "aws_lc_rs", "pem"] }
+
+# Serialization
+serde = { version = "1", default-features = false, features = ["derive"] }
+serde_json = { version = "1", default-features = false }
+toml = { version = "1.1", default-features = false, features = ["parse", "display", "serde"] }
+
+# CLI
+clap = { version = "4", default-features = false, features = ["derive", "std"] }
+
+# Terminal UI
+ratatui = { version = "0.30", default-features = false, features = ["crossterm"] }
+crossterm = { version = "0.29", default-features = false, features = ["event-stream", "windows"] }
+indicatif = { version = "0.18", default-features = false }
+
+# Cryptography
+sha2 = { version = "0.11", default-features = false }
+hex = { version = "0.4", default-features = false, features = ["alloc"] }
+
+# Identifiers & time
+uuid = { version = "1", default-features = false, features = ["v4"] }
+nanoid = { version = "0.5", default-features = false }
+chrono = { version = "0.4", default-features = false, features = ["clock", "serde"] }
+
+# Filesystem
+walkdir = { version = "2", default-features = false }
+zip = { version = "8.5", default-features = false, features = ["deflate"] }
+dirs = { version = "6", default-features = false }
+
+# Networking / Discovery
+mdns-sd = { version = "0.19", default-features = false }
+hostname = { version = "0.4", default-features = false }
+socket2 = { version = "0.6", default-features = false }
+
+# Utilities
+anyhow = { version = "1", default-features = false }
+arboard = { version = "3", default-features = false }
+qrcode = { version = "0.14", default-features = false }
+
