@@ -3,6 +3,7 @@ mod config;
 mod discovery;
 mod server;
 mod shares;
+mod tls;
 mod tui;
 
 use anyhow::Result;
@@ -136,13 +137,16 @@ async fn run_tui(username_override: Option<String>, port_override: Option<u16>) 
         download_dir: config.download_dir.clone(),
     });
 
-    // Start HTTP server
+    // Start HTTPS server
     let addr: SocketAddr = format!("0.0.0.0:{}", config.port).parse()?;
     let router = server::build_router_with_connect_info(state);
-    let listener = tokio::net::TcpListener::bind(addr).await?;
+    let tls_config = tls::load_or_generate().await?;
 
     tokio::spawn(async move {
-        axum::serve(listener, router).await.ok();
+        axum_server::bind_rustls(addr, tls_config)
+            .serve(router)
+            .await
+            .ok();
     });
 
     // Start mDNS
@@ -213,7 +217,7 @@ async fn run_send(
         item.size_human(),
         item.id
     );
-    println!("Browse at: http://0.0.0.0:{}/", config.port);
+    println!("Browse at: https://0.0.0.0:{}/", config.port);
     println!("SHA256: {}", item.checksum);
     println!("Press Ctrl+C to stop sharing.");
 
@@ -227,7 +231,9 @@ async fn run_send(
 
     let addr: SocketAddr = format!("0.0.0.0:{}", config.port).parse()?;
     let router = server::build_router_with_connect_info(state);
-    let listener = tokio::net::TcpListener::bind(addr).await?;
-    axum::serve(listener, router).await?;
+    let tls_config = tls::load_or_generate().await?;
+    axum_server::bind_rustls(addr, tls_config)
+        .serve(router)
+        .await?;
     Ok(())
 }

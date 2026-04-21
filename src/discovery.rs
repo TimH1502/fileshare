@@ -33,7 +33,7 @@ pub struct Peer {
 
 impl Peer {
     pub fn http_base(&self) -> String {
-        format!("http://{}:{}", self.addr, self.port)
+        format!("https://{}:{}", self.addr, self.port)
     }
 
     pub fn is_stale(&self) -> bool {

@@ -27,6 +27,7 @@ pub struct ListResponse {
 pub async fn fetch_peer_shares(base_url: &str) -> Result<ListResponse> {
     let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(5))
+        .danger_accept_invalid_certs(true) // self-signed cert on local network
         .build()?;
     let resp = client
         .get(format!("{}/shares", base_url))
@@ -59,7 +60,9 @@ pub async fn download_file(
 ) -> Result<DownloadResult> {
     tokio::fs::create_dir_all(download_dir).await?;
 
-    let client = reqwest::Client::new();
+    let client = reqwest::Client::builder()
+        .danger_accept_invalid_certs(true) // self-signed cert on local network
+        .build()?;
     let resp = client
         .get(format!("{}/download/{}", base_url, share_id))
         .send()

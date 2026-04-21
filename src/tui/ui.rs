@@ -804,7 +804,7 @@ fn local_ipv4() -> String {
 }
 
 fn draw_qr_overlay(f: &mut Frame, app: &App, area: Rect) {
-    let url = format!("http://{}:{}/", local_ipv4(), app.config.port);
+    let url = format!("https://{}:{}/", local_ipv4(), app.config.port);
 
     // Generate QR matrix
     let code = match QrCode::new(url.as_bytes()) {
