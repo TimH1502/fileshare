@@ -3,7 +3,7 @@ use futures::StreamExt;
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
 use std::path::PathBuf;
-use tokio::io::AsyncWriteExt;
+use tokio::{io::AsyncWriteExt, time::Instant};
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct RemoteShareInfo {
@@ -38,6 +38,7 @@ pub struct DownloadProgress {
     pub bytes_downloaded: u64,
     pub total_bytes: u64,
     pub speed_bps: f64,
+    pub eta_seconds: f64,
 }
 
 /// Result of a completed download, including integrity check outcome.
@@ -94,7 +95,6 @@ pub async fn download_file(
     let mut stream = resp.bytes_stream();
 
     let mut downloaded = 0u64;
-    let start = std::time::Instant::now();
 
     // Compute checksum while streaming so we don't need a second pass
     let mut hasher = Sha256::new();
@@ -105,17 +105,57 @@ pub async fn download_file(
         file.write_all(&chunk).await?;
         downloaded += chunk.len() as u64;
 
-        let elapsed = start.elapsed().as_secs_f64().max(0.001);
-        let speed = downloaded as f64 / elapsed;
+        let mut last_bytes = 0;
+        let mut last_time = Instant::now();
+        let mut last_update = Instant::now();
 
-        progress_tx
-            .send(DownloadProgress {
-                bytes_downloaded: downloaded,
-                total_bytes: total,
-                speed_bps: speed,
-            })
-            .await
-            .ok();
+        let mut smoothed_speed = 0.0;
+        let alpha = 0.2;
+
+        while let Some(chunk) = stream.next().await {
+            let chunk = chunk?;
+
+            // write + hash SAME bytes
+            file.write_all(&chunk).await?;
+            hasher.update(&chunk);
+
+            downloaded += chunk.len() as u64;
+
+            let now = Instant::now();
+            let elapsed = now.duration_since(last_time).as_secs_f64();
+
+            let new_speed = if elapsed > 0.0 {
+                (downloaded - last_bytes) as f64 / elapsed
+            } else {
+                0.0
+            };
+
+            // EMA smoothing
+            smoothed_speed = if smoothed_speed == 0.0 {
+                new_speed
+            } else {
+                alpha * new_speed + (1.0 - alpha) * smoothed_speed
+            };
+
+            let eta_seconds = if smoothed_speed > 0.0 {
+                total.saturating_sub(downloaded) as f64 / smoothed_speed // no underflow
+            } else {
+                0.0
+            };
+
+            if last_update.elapsed() >= tokio::time::Duration::from_millis(100) {
+                let _ = progress_tx.try_send(DownloadProgress {
+                    bytes_downloaded: downloaded,
+                    total_bytes: total,
+                    speed_bps: smoothed_speed,
+                    eta_seconds,
+                });
+
+                last_update = now;
+                last_time = now;
+                last_bytes = downloaded;
+            }
+        }
     }
 
     file.flush().await?;

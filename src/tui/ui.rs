@@ -337,8 +337,9 @@ fn draw_transfer_row_download(f: &mut Frame, dl: &DownloadState, area: Rect) {
         ]),
         Line::from(Span::styled(bar, Style::default().fg(color))),
         Line::from(vec![
-            Span::styled(format!(" {:.0}% ", pct * 100.0), Style::default().fg(Color::White)),
+            Span::styled(format!(" {:.0} % ", pct * 100.0), Style::default().fg(Color::White)),
             Span::styled(format!("{} ", right_label), Style::default().fg(DIM)),
+            Span::styled(format!("{} ", format_eta(dl.eta_seconds)), Style::default().fg(DIM)),
         ]),
     ];
     f.render_widget(Paragraph::new(text), area);
@@ -360,11 +361,27 @@ fn draw_transfer_row_upload(f: &mut Frame, ul: &UploadState, area: Rect) {
         ]),
         Line::from(Span::styled(bar, Style::default().fg(color))),
         Line::from(vec![
-            Span::styled(format!(" {:.0}% ", pct * 100.0), Style::default().fg(Color::White)),
+            Span::styled(format!(" {:.0} % ", pct * 100.0), Style::default().fg(Color::White)),
             Span::styled(format!("{} ", right_label), Style::default().fg(DIM)),
         ]),
     ];
     f.render_widget(Paragraph::new(text), area);
+}
+
+fn format_eta(seconds: f64) -> String {
+    let secs = seconds.round() as u64;
+
+    let h = secs / 3600;
+    let m = (secs % 3600) / 60;
+    let s = secs % 60;
+
+    if h > 0 {
+        format!("{} h {} m {} s", h, m, s)
+    } else if m > 0 {
+        format!("{} m {} s", m, s)
+    } else {
+        format!("{} s", s)
+    }
 }
 
 fn draw_my_shares(f: &mut Frame, app: &App, area: Rect) {

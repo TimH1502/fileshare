@@ -38,6 +38,7 @@ pub struct DownloadState {
     pub speed_bps: f64,
     pub done: bool,
     pub done_at: Option<std::time::Instant>,
+    pub eta_seconds: f64,
 }
 
 #[derive(Debug, Clone)]
@@ -420,6 +421,7 @@ impl App {
             speed_bps: 0.0,
             done: false,
             done_at: None,
+            eta_seconds: 0.0,
         });
 
         self.log(format!("Downloading '{}'…", file.name), LogKind::Info);
@@ -498,6 +500,7 @@ impl App {
                     dl.bytes_done = progress.bytes_downloaded;
                     dl.total = progress.total_bytes;
                     dl.speed_bps = progress.speed_bps;
+                    dl.eta_seconds = progress.eta_seconds;
                 }
             }
             AppEvent::DownloadDone { id, result } => {
