@@ -1,5 +1,5 @@
 use axum::{
-    extract::{Multipart, Path, State},
+    extract::{DefaultBodyLimit, Multipart, Path, State},
     http::{header, StatusCode},
     response::{IntoResponse, Json, Response},
     routing::{get, post},
@@ -23,6 +23,8 @@ pub struct AppState {
 pub enum ServerEvent {
     Downloaded { item_name: String, by_addr: String },
     Uploaded { item_name: String, by_addr: String },
+    UploadProgress { item_id: String, bytes_sent: u64, total: u64 },
+    UploadDone { item_id: String },
 }
 
 #[derive(Serialize)]
@@ -78,6 +80,51 @@ async fn list_shares(State(state): State<Arc<AppState>>) -> Json<ListResponse> {
     })
 }
 
+/// Wraps a byte stream and fires ServerEvent::UploadProgress as chunks flow through.
+/// Used in download_file so the server can track how much it has sent to each peer.
+struct ProgressStream {
+    inner: tokio_util::io::ReaderStream<tokio::fs::File>,
+    event_tx: broadcast::Sender<ServerEvent>,
+    item_id: String,
+    bytes_sent: u64,
+    total: u64,
+    last_report: u64,
+}
+
+impl futures::Stream for ProgressStream {
+    type Item = Result<bytes::Bytes, std::io::Error>;
+
+    fn poll_next(
+        mut self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Option<Self::Item>> {
+        use std::pin::Pin;
+        let result = Pin::new(&mut self.inner).poll_next(cx);
+        if let std::task::Poll::Ready(Some(Ok(ref chunk))) = result {
+            self.bytes_sent += chunk.len() as u64;
+            // Report every 64 KB to avoid flooding the broadcast channel
+            if self.bytes_sent - self.last_report >= 65_536 || self.bytes_sent == self.total {
+                self.last_report = self.bytes_sent;
+                self.event_tx
+                    .send(ServerEvent::UploadProgress {
+                        item_id: self.item_id.clone(),
+                        bytes_sent: self.bytes_sent,
+                        total: self.total,
+                    })
+                    .ok();
+            }
+        }
+        if let std::task::Poll::Ready(None) = result {
+            self.event_tx
+                .send(ServerEvent::UploadDone {
+                    item_id: self.item_id.clone(),
+                })
+                .ok();
+        }
+        result
+    }
+}
+
 async fn download_file(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
@@ -117,10 +164,15 @@ async fn download_file(
             Ok(Ok(tmp_path)) => match tokio::fs::File::open(&tmp_path).await {
                 Ok(file) => {
                     let size = tokio::fs::metadata(&tmp_path).await.map(|m| m.len()).unwrap_or(0);
-                    let stream = tokio_util::io::ReaderStream::new(file);
-                    let body = axum::body::Body::from_stream(stream);
-                    // Cleanup: the temp file is unlinked immediately; the OS keeps it
-                    // accessible through the open file handle until the stream finishes.
+                    let progress_stream = ProgressStream {
+                        inner: tokio_util::io::ReaderStream::new(file),
+                        event_tx: state.event_tx.clone(),
+                        item_id: item.id.clone(),
+                        bytes_sent: 0,
+                        total: size,
+                        last_report: 0,
+                    };
+                    let body = axum::body::Body::from_stream(progress_stream);
                     tokio::fs::remove_file(&tmp_path).await.ok();
                     Response::builder()
                         .status(StatusCode::OK)
@@ -140,8 +192,15 @@ async fn download_file(
 
     match tokio::fs::File::open(&item.path).await {
         Ok(file) => {
-            let stream = tokio_util::io::ReaderStream::new(file);
-            let body = axum::body::Body::from_stream(stream);
+            let progress_stream = ProgressStream {
+                inner: tokio_util::io::ReaderStream::new(file),
+                event_tx: state.event_tx.clone(),
+                item_id: item.id.clone(),
+                bytes_sent: 0,
+                total: item.size,
+                last_report: 0,
+            };
+            let body = axum::body::Body::from_stream(progress_stream);
 
             let (content_type, filename) = if matches!(item.kind, ShareKind::ZippedFolder) {
                 ("application/zip".to_string(), format!("{}.zip", item.name))
@@ -570,7 +629,7 @@ pub fn build_router_with_connect_info(
         .route("/", get(serve_browser_ui))
         .route("/shares", get(list_shares))
         .route("/download/{id}", get(download_file))
-        .route("/upload", post(upload_file))
+        .route("/upload", post(upload_file).layer(DefaultBodyLimit::disable()))
         .with_state(state)
         .into_make_service_with_connect_info::<std::net::SocketAddr>()
 }

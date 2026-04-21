@@ -190,6 +190,10 @@ pub async fn run(
                 app.active_downloads.retain(|d| {
                     d.done_at.map(|t| t.elapsed().as_secs() < 5).unwrap_or(true)
                 });
+                // Same for uploads
+                app.active_uploads.retain(|u| {
+                    u.done_at.map(|t| t.elapsed().as_secs() < 5).unwrap_or(true)
+                });
 
                 let _ = event_tx.send(AppEvent::Tick).await; // send tick for auto file refresh 
             }
@@ -233,16 +237,34 @@ pub async fn run(
 
                         match key.code {
                             KeyCode::Char(c) => {
-                                let could_start_path = c == '/' || c == '\\';
+                                // '/' or '\' → definitely starting a path
+                                let is_path_start = c == '/' || c == '\\';
+                                // Single letter could be a Windows drive letter (C:\ D:\…)
+                                // We speculate and wait for the second char to confirm.
+                                let is_letter = c.is_ascii_alphabetic();
 
                                 if accumulating || (!path_buf.is_empty()) {
+                                    // Already accumulating — check if prev buffer is a lone
+                                    // letter and this char is NOT ':', meaning it's a normal
+                                    // keystroke like 'jk' — flush and handle normally.
+                                    let prev_is_lone_letter = path_buf.len() == 1
+                                        && path_buf.chars().next().map(|ch| ch.is_ascii_alphabetic()).unwrap_or(false);
+                                    if prev_is_lone_letter && c != ':' && !accumulating {
+                                        // Not a drive letter — flush the buffered letter as key,
+                                        // then handle current char normally too.
+                                        let lone = path_buf.chars().next().unwrap();
+                                        path_buf.clear();
+                                        last_key_time = None;
+                                        app.handle_key(crossterm::event::KeyEvent::from(KeyCode::Char(lone)));
+                                        app.handle_key(key);
+                                    } else {
+                                        path_buf.push(c);
+                                        last_key_time = Some(Instant::now());
+                                    }
+                                } else if (is_path_start || is_letter) && !in_input_mode {
                                     path_buf.push(c);
                                     last_key_time = Some(Instant::now());
-                                } else if could_start_path && !in_input_mode {
-                                    // Speculatively start accumulating — this might be drag & drop
-                                    path_buf.push(c);
-                                    last_key_time = Some(Instant::now());
-                                    accumulating = false; // tentative — wait for more chars
+                                    accumulating = false; // tentative
                                 } else {
                                     app.handle_key(key);
                                 }

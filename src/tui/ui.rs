@@ -1,5 +1,5 @@
 use crate::shares::ShareKind;
-use crate::tui::app::{App, DownloadState, Focus, LogKind, ZipConfirmRequest};
+use crate::tui::app::{App, DownloadState, Focus, LogKind, UploadState, ZipConfirmRequest};
 use qrcode::QrCode;
 use ratatui::{
     layout::{Constraint, Direction, Layout, Rect},
@@ -19,11 +19,11 @@ const SELECTED_BG: Color = Color::Rgb(30, 50, 60);
 pub fn draw(f: &mut Frame, app: &App) {
     let area = f.size();
 
-    let dl_count = app.active_downloads.len();
-    // Always allocate at least 5 rows for the download panel so layout
-    // doesn't jump when a fast download starts and immediately finishes.
+    let transfer_count = app.active_downloads.len() + app.active_uploads.len();
+    // Always allocate at least 5 rows for the transfer panel so layout
+    // doesn't jump when a fast transfer starts and immediately finishes.
     // Cap at 3 simultaneous entries (10 rows) to leave room for the log.
-    let dl_height = (dl_count as u16 * 3 + 2).max(5).min(11);
+    let dl_height = (transfer_count as u16 * 3 + 2).max(5).min(11);
 
     let root = Layout::default()
         .direction(Direction::Vertical)
@@ -38,7 +38,7 @@ pub fn draw(f: &mut Frame, app: &App) {
 
     draw_title_bar(f, app, root[0]);
     draw_main(f, app, root[1]);
-    draw_downloads_panel(f, &app.active_downloads, root[2]);
+    draw_transfers_panel(f, &app.active_downloads, &app.active_uploads, root[2]);
     draw_log(f, app, root[3]);
     draw_status_bar(f, app, root[4]);
 
@@ -274,17 +274,19 @@ fn draw_peer_files(f: &mut Frame, app: &App, area: Rect) {
 }
 
 /// Renders a dedicated panel showing all active downloads (always visible).
-fn draw_downloads_panel(f: &mut Frame, downloads: &[DownloadState], area: Rect) {
-    let (title, border_color) = if downloads.is_empty() {
-        (
-            " Downloads ".to_string(),
-            DIM,
-        )
+const UPLOAD_COLOR: Color = Color::Rgb(255, 165, 0);
+
+fn draw_transfers_panel(
+    f: &mut Frame,
+    downloads: &[DownloadState],
+    uploads: &[UploadState],
+    area: Rect,
+) {
+    let total = downloads.len() + uploads.len();
+    let (title, border_color) = if total == 0 {
+        (" Transfers ".to_string(), DIM)
     } else {
-        (
-            format!(" Downloads ({}) ", downloads.len()),
-            DOWNLOAD_COLOR,
-        )
+        (format!(" Transfers ({}) ", total), DOWNLOAD_COLOR)
     };
 
     let block = Block::default()
@@ -295,55 +297,70 @@ fn draw_downloads_panel(f: &mut Frame, downloads: &[DownloadState], area: Rect) 
     let inner = block.inner(area);
     f.render_widget(block, area);
 
-    if downloads.is_empty() {
+    if total == 0 {
         let hint = Paragraph::new(Line::from(Span::styled(
-            "  No active downloads",
+            "  No active transfers",
             Style::default().fg(DIM),
         )));
         f.render_widget(hint, inner);
         return;
     }
 
-    // Each download gets 3 lines: name, bar, stats
     let mut y = inner.y;
-    for dl in downloads {
-        if y + 3 > inner.y + inner.height {
-            break;
-        }
+    for ul in uploads {
+        if y + 3 > inner.y + inner.height { break; }
         let row = Rect { y, height: 3, ..inner };
-        draw_download_progress(f, dl, row);
+        draw_transfer_row_upload(f, ul, row);
+        y += 3;
+    }
+    for dl in downloads {
+        if y + 3 > inner.y + inner.height { break; }
+        let row = Rect { y, height: 3, ..inner };
+        draw_transfer_row_download(f, dl, row);
         y += 3;
     }
 }
 
-fn draw_download_progress(f: &mut Frame, dl: &DownloadState, area: Rect) {
-    let pct = if dl.done {
-        1.0
-    } else if dl.total > 0 {
+fn draw_transfer_row_download(f: &mut Frame, dl: &DownloadState, area: Rect) {
+    let pct = if dl.done { 1.0 } else if dl.total > 0 {
         (dl.bytes_done as f64 / dl.total as f64).min(1.0)
-    } else {
-        0.0
-    };
+    } else { 0.0 };
     let bar_width = area.width.saturating_sub(2) as usize;
     let filled = (pct * bar_width as f64) as usize;
-    let bar_color = if dl.done { SUCCESS } else { DOWNLOAD_COLOR };
+    let color = if dl.done { SUCCESS } else { DOWNLOAD_COLOR };
     let bar: String = "█".repeat(filled) + &"░".repeat(bar_width - filled);
-    let pct_str = format!("{:.0}%", pct * 100.0);
-    let right_label = if dl.done {
-        "done".to_string()
-    } else {
-        crate::client::format_speed(dl.speed_bps)
-    };
-    let icon = if dl.done { "✓" } else { "⬇" };
-
+    let right_label = if dl.done { "done".to_string() } else { crate::client::format_speed(dl.speed_bps) };
     let text = vec![
-        Line::from(Span::styled(
-            format!(" {} {}", icon, dl.name),
-            Style::default().fg(bar_color).add_modifier(Modifier::BOLD),
-        )),
-        Line::from(Span::styled(bar, Style::default().fg(bar_color))),
         Line::from(vec![
-            Span::styled(format!(" {} ", pct_str), Style::default().fg(Color::White)),
+            Span::styled(" ⬇ ", Style::default().fg(DOWNLOAD_COLOR).add_modifier(Modifier::BOLD)),
+            Span::styled(dl.name.clone(), Style::default().fg(color).add_modifier(Modifier::BOLD)),
+        ]),
+        Line::from(Span::styled(bar, Style::default().fg(color))),
+        Line::from(vec![
+            Span::styled(format!(" {:.0}% ", pct * 100.0), Style::default().fg(Color::White)),
+            Span::styled(format!("{} ", right_label), Style::default().fg(DIM)),
+        ]),
+    ];
+    f.render_widget(Paragraph::new(text), area);
+}
+
+fn draw_transfer_row_upload(f: &mut Frame, ul: &UploadState, area: Rect) {
+    let pct = if ul.done { 1.0 } else if ul.total > 0 {
+        (ul.bytes_sent as f64 / ul.total as f64).min(1.0)
+    } else { 0.0 };
+    let bar_width = area.width.saturating_sub(2) as usize;
+    let filled = (pct * bar_width as f64) as usize;
+    let color = if ul.done { SUCCESS } else { UPLOAD_COLOR };
+    let bar: String = "█".repeat(filled) + &"░".repeat(bar_width - filled);
+    let right_label = if ul.done { "done".to_string() } else { crate::client::format_speed(ul.speed_bps) };
+    let text = vec![
+        Line::from(vec![
+            Span::styled(" ⬆ ", Style::default().fg(color).add_modifier(Modifier::BOLD)),
+            Span::styled(ul.name.clone(), Style::default().fg(color).add_modifier(Modifier::BOLD)),
+        ]),
+        Line::from(Span::styled(bar, Style::default().fg(color))),
+        Line::from(vec![
+            Span::styled(format!(" {:.0}% ", pct * 100.0), Style::default().fg(Color::White)),
             Span::styled(format!("{} ", right_label), Style::default().fg(DIM)),
         ]),
     ];

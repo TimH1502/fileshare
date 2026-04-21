@@ -3,7 +3,7 @@ use crate::config::Config;
 use crate::discovery::{Peer, PeerRegistry};
 use crate::server::ServerEvent;
 use crate::shares::ShareRegistry;
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, Local};
 use std::path::PathBuf;
 use tokio::sync::mpsc;
 
@@ -16,7 +16,7 @@ pub enum Focus {
 
 #[derive(Debug, Clone)]
 pub struct LogEntry {
-    pub timestamp: DateTime<Utc>,
+    pub timestamp: DateTime<Local>,
     pub message: String,
     pub kind: LogKind,
 }
@@ -39,6 +39,20 @@ pub struct DownloadState {
     pub done: bool,
     pub done_at: Option<std::time::Instant>,
     pub error: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+pub struct UploadState {
+    pub id: String,       // share id (from ServerEvent)
+    pub name: String,
+    pub bytes_sent: u64,
+    pub total: u64,
+    pub speed_bps: f64,
+    pub done: bool,
+    pub done_at: Option<std::time::Instant>,
+    pub started_at: std::time::Instant,
+    pub last_bytes: u64,  // for speed calculation
+    pub last_tick: std::time::Instant,
 }
 
 /// Pending zip-confirmation request shown to the user.
@@ -83,6 +97,8 @@ pub struct App {
     pub log: Vec<LogEntry>,
     /// Active downloads keyed by share id — supports multiple simultaneous downloads
     pub active_downloads: Vec<DownloadState>,
+    /// Active uploads (files being sent to remote peers)
+    pub active_uploads: Vec<UploadState>,
 
     pub show_help: bool,
     pub show_qr: bool,
@@ -116,6 +132,7 @@ impl App {
             my_shares_state: 0,
             log: vec![],
             active_downloads: vec![],
+            active_uploads: vec![],
             show_help: false,
             show_qr: false,
             manual_ip_input: None,
@@ -129,7 +146,7 @@ impl App {
 
     pub fn log(&mut self, message: impl Into<String>, kind: LogKind) {
         self.log.push(LogEntry {
-            timestamp: Utc::now(),
+            timestamp: Local::now(),
             message: message.into(),
             kind,
         });
@@ -540,6 +557,49 @@ impl App {
                     format!("⬆ '{}' uploaded by {}", item_name, by_addr),
                     LogKind::Success,
                 );
+                // Mark the matching upload as done (may already be pruned if tiny file)
+                if let Some(ul) = self.active_uploads.iter_mut().find(|u| u.name == item_name && !u.done) {
+                    ul.done = true;
+                    ul.done_at = Some(std::time::Instant::now());
+                    ul.bytes_sent = ul.total;
+                }
+            }
+            AppEvent::ServerEvent(ServerEvent::UploadProgress { item_id, bytes_sent, total }) => {
+                let now = std::time::Instant::now();
+                if let Some(ul) = self.active_uploads.iter_mut().find(|u| u.id == item_id) {
+                    // Compute instantaneous speed since last progress tick
+                    let elapsed = now.duration_since(ul.last_tick).as_secs_f64().max(0.001);
+                    let delta = bytes_sent.saturating_sub(ul.last_bytes) as f64;
+                    ul.speed_bps = delta / elapsed;
+                    ul.last_bytes = bytes_sent;
+                    ul.last_tick = now;
+                    ul.bytes_sent = bytes_sent;
+                    ul.total = total;
+                } else {
+                    // First progress event for this id — look up the share name
+                    let name = self.shares.get(&item_id)
+                        .map(|s| s.name.clone())
+                        .unwrap_or_else(|| item_id.clone());
+                    self.active_uploads.push(UploadState {
+                        id: item_id,
+                        name,
+                        bytes_sent,
+                        total,
+                        speed_bps: 0.0,
+                        done: false,
+                        done_at: None,
+                        started_at: now,
+                        last_bytes: bytes_sent,
+                        last_tick: now,
+                    });
+                }
+            }
+            AppEvent::ServerEvent(ServerEvent::UploadDone { item_id }) => {
+                if let Some(ul) = self.active_uploads.iter_mut().find(|u| u.id == item_id) {
+                    ul.done = true;
+                    ul.done_at = Some(std::time::Instant::now());
+                    ul.bytes_sent = ul.total;
+                }
             }
             AppEvent::ShareAdded(item) => {
                 self.log(
@@ -598,10 +658,18 @@ impl App {
                     }
                 }
 
-                // Optional: cleanup finished downloads (you already hinted this exists)
+                // Cleanup finished downloads and uploads after 5 seconds visible
                 self.active_downloads.retain(|d| {
                     if d.done {
                         if let Some(done_at) = d.done_at {
+                            return done_at.elapsed().as_secs() < 3;
+                        }
+                    }
+                    true
+                });
+                self.active_uploads.retain(|u| {
+                    if u.done {
+                        if let Some(done_at) = u.done_at {
                             return done_at.elapsed().as_secs() < 3;
                         }
                     }
