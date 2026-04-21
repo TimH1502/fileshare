@@ -601,6 +601,12 @@ impl App {
                     ul.bytes_sent = ul.total;
                 }
             }
+            AppEvent::ServerEvent(ServerEvent::Deleted { item_name }) => {
+                self.log(
+                    format!("🗑 '{}' deleted via web UI", item_name),
+                    LogKind::Warning,
+                );
+            }
             AppEvent::ShareAdded(item) => {
                 self.log(
                     format!("+ Sharing '{}' ({})", item.name, item.size_human()),

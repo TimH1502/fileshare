@@ -2,7 +2,7 @@ use axum::{
     extract::{DefaultBodyLimit, Multipart, Path, State},
     http::{header, StatusCode},
     response::{IntoResponse, Json, Response},
-    routing::{get, post},
+    routing::{delete, get, post},
     Router,
 };
 use serde::Serialize;
@@ -25,6 +25,7 @@ pub enum ServerEvent {
     Uploaded { item_name: String, by_addr: String },
     UploadProgress { item_id: String, bytes_sent: u64, total: u64 },
     UploadDone { item_id: String },
+    Deleted { item_name: String },
 }
 
 #[derive(Serialize)]
@@ -410,12 +411,14 @@ async fn serve_browser_ui(State(state): State<Arc<AppState>>) -> axum::response:
                 <td>{}</td>
                 <td>{}</td>
                 <td><a href="/download/{}" download>Download</a></td>
+                <td><button onclick="deleteShare('{}', this)" style="background:none;border:1px solid #f85149;color:#f85149;border-radius:4px;padding:2px 8px;cursor:pointer;font-family:monospace;font-size:0.85em">&#x2715; Delete</button></td>
                </tr>"#,
             kind_icon,
             html_escape(&item.name),
             item.size_human(),
             item.download_count,
-            html_escape(&item.id),  // FIX: escape id in href
+            html_escape(&item.id),
+            html_escape(&item.id),
         ));
     }
 
@@ -491,7 +494,7 @@ async fn serve_browser_ui(State(state): State<Arc<AppState>>) -> axum::response:
   <div id="upload-list"></div>
 
   <table>
-    <thead><tr><th>Name</th><th>Size</th><th>Downloads</th><th></th></tr></thead>
+    <thead><tr><th>Name</th><th>Size</th><th>Downloads</th><th></th><th></th></tr></thead>
     <tbody id="shares-body">{rows}</tbody>
   </table>
 
@@ -512,16 +515,28 @@ async fn serve_browser_ui(State(state): State<Arc<AppState>>) -> axum::response:
       return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
     }}
     function renderRows(items) {{
-      if (!items.length) return '<tr><td colspan="4" style="color:#8b949e">No files shared yet.</td></tr>';
+      if (!items.length) return '<tr><td colspan="5" style="color:#8b949e">No files shared yet.</td></tr>';
       return items.map(it => `
         <tr>
           <td>${{iconFor(it.kind)}} ${{esc(it.name)}}</td>
           <td>${{esc(it.size_human)}}</td>
           <td>${{it.download_count}}</td>
           <td><a href="/download/${{esc(it.id)}}" download>Download</a></td>
+          <td><button onclick="deleteShare('${{esc(it.id)}}', this)" style="background:none;border:1px solid #f85149;color:#f85149;border-radius:4px;padding:2px 8px;cursor:pointer;font-family:monospace;font-size:0.85em">✕ Delete</button></td>
         </tr>`).join('');
     }}
     function setStatus(ok, txt) {{ status.className = ok ? 'ok' : 'err'; status.textContent = txt; }}
+
+    async function deleteShare(id, btn) {{
+      if (!confirm('Remove this share? The file on disk is NOT deleted.')) return;
+      btn.disabled = true;
+      btn.textContent = '…';
+      try {{
+        const r = await fetch('/shares/' + id, {{ method: 'DELETE' }});
+        const d = await r.json();
+        if (d.ok) {{ poll(); }} else {{ btn.textContent = '✕'; btn.disabled = false; alert(d.error || 'Delete failed'); }}
+      }} catch {{ btn.textContent = '✕'; btn.disabled = false; }}
+    }}
 
     async function poll() {{
       if (document.hidden) return;
@@ -622,12 +637,34 @@ fn html_escape(s: &str) -> String {
         .replace('"', "&quot;")
 }
 
+/// DELETE /shares/:id  — removes a share from the registry.
+async fn delete_share(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+) -> Response {
+    match state.shares.remove(&id) {
+        Some(item) => {
+            state
+                .event_tx
+                .send(ServerEvent::Deleted { item_name: item.name })
+                .ok();
+            (StatusCode::OK, Json(serde_json::json!({ "ok": true }))).into_response()
+        }
+        None => (
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({ "ok": false, "error": "Share not found" })),
+        )
+            .into_response(),
+    }
+}
+
 pub fn build_router_with_connect_info(
     state: Arc<AppState>,
 ) -> axum::extract::connect_info::IntoMakeServiceWithConnectInfo<Router, std::net::SocketAddr> {
     Router::new()
         .route("/", get(serve_browser_ui))
         .route("/shares", get(list_shares))
+        .route("/shares/{id}", delete(delete_share))
         .route("/download/{id}", get(download_file))
         .route("/upload", post(upload_file).layer(DefaultBodyLimit::disable()))
         .with_state(state)
