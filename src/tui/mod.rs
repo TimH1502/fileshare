@@ -55,6 +55,7 @@ fn try_share_path(
 ) {
     let cleaned = deduplicate_path(raw.trim().trim_matches('"').trim_matches('\''));
     let path = PathBuf::from(&cleaned);
+    crate::config::debug_log(&format!("try_share_path: raw={:?} cleaned={:?} exists={}", raw, cleaned, path.exists()));
     let etx = event_tx.clone();
     let shares_c = shares.clone();
     tokio::spawn(async move {

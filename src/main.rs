@@ -111,17 +111,23 @@ fn prompt_username() -> Result<String> {
 async fn run_tui(username_override: Option<String>, port_override: Option<u16>) -> Result<()> {
     let config = setup(username_override, port_override).await?;
 
+    crate::config::debug_log(&format!("run_tui: config.download_dir = {:?}", config.download_dir));
+
     let cache_dir = config
         .download_dir
         .parent()
         .unwrap_or(&config.download_dir)
         .join(".fileshare_zip_cache");
 
+    crate::config::debug_log(&format!("run_tui: cache_dir = {:?}", cache_dir));
+
     let index_path = Config::config_path()
         .parent()
         .map(|p| p.to_path_buf())
         .unwrap_or_else(|| std::path::PathBuf::from("."))
         .join("shares.index.json");
+
+    crate::config::debug_log(&format!("run_tui: index_path = {:?}", index_path));
 
     let shares = ShareRegistry::new(cache_dir, index_path);
     let restored = shares.restore_from_index();

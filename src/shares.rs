@@ -227,13 +227,16 @@ impl ShareRegistry {
         expires_in_mins: Option<u64>,
         on_zipping: impl FnOnce(&str) + Send + 'static,
     ) -> Result<SharedItem> {
-        let path = path.canonicalize()?;
+        crate::config::debug_log(&format!("shares::add() input path = {:?}", path));
+        let canon = path.canonicalize();
+        crate::config::debug_log(&format!("shares::add() canonicalize = {:?}", canon));
+        let path = canon?;
         let item = if path.is_file() {
             self.add_file(path, download_limit, expires_in_mins)?
         } else if path.is_dir() {
             self.add_folder(path, download_limit, expires_in_mins, on_zipping)?
         } else {
-            anyhow::bail!("Path is neither a file nor a directory: {:?}", path);
+            anyhow::bail!("Path is neither a file nor a directory: {:?}", path)
         };
 
         let mut store = self.inner.write().unwrap();
@@ -321,7 +324,10 @@ impl ShareRegistry {
         should_zip: bool,
         on_zipping: impl FnOnce(&str) + Send + 'static,
     ) -> Result<SharedItem> {
-        let path = path.canonicalize()?;
+        crate::config::debug_log(&format!("shares::add_with_zip_choice() input path = {:?}", path));
+        let canon = path.canonicalize();
+        crate::config::debug_log(&format!("shares::add_with_zip_choice() canonicalize = {:?}", canon));
+        let path = canon?;
         if path.is_file() {
             let item = self.add_file(path, download_limit, expires_in_mins)?;
             let mut store = self.inner.write().unwrap();
