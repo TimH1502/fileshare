@@ -131,17 +131,8 @@ pub async fn download_file(
             };
 
             // EMA smoothing
-            smoothed_speed = if smoothed_speed == 0.0 {
-                new_speed
-            } else {
-                alpha * new_speed + (1.0 - alpha) * smoothed_speed
-            };
-
-            let eta_seconds = if smoothed_speed > 0.0 {
-                total.saturating_sub(downloaded) as f64 / smoothed_speed // no underflow
-            } else {
-                0.0
-            };
+            let eta_seconds;
+            (eta_seconds, smoothed_speed) = calc_eta_seconds(smoothed_speed, new_speed, alpha, total, downloaded);
 
             if last_update.elapsed() >= tokio::time::Duration::from_millis(100) {
                 let _ = progress_tx.try_send(DownloadProgress {
@@ -175,6 +166,22 @@ pub async fn download_file(
         path: dest_path,
         checksum_ok,
     })
+}
+
+// EMA smoothing
+pub fn calc_eta_seconds(mut smoothed_speed: f64, new_speed: f64, alpha: f64, total: u64, downloaded: u64)-> (f64, f64) {
+    smoothed_speed = if smoothed_speed == 0.0 {
+            new_speed
+    } else {
+        alpha * new_speed + (1.0 - alpha) * smoothed_speed
+    };
+
+    let eta_seconds = if smoothed_speed > 0.0 {
+        total.saturating_sub(downloaded) as f64 / smoothed_speed // no underflow
+    } else {
+        0.0
+    };
+    (eta_seconds, smoothed_speed)
 }
 
 pub fn format_speed(bps: f64) -> String {

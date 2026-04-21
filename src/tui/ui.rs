@@ -363,6 +363,7 @@ fn draw_transfer_row_upload(f: &mut Frame, ul: &UploadState, area: Rect) {
         Line::from(vec![
             Span::styled(format!(" {:.0} % ", pct * 100.0), Style::default().fg(Color::White)),
             Span::styled(format!("{} ", right_label), Style::default().fg(DIM)),
+            Span::styled(format!("{} ", format_eta(ul.eta_seconds)), Style::default().fg(DIM)),
         ]),
     ];
     f.render_widget(Paragraph::new(text), area);

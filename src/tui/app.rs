@@ -1,4 +1,4 @@
-use crate::client::{self, DownloadResult, RemoteShareInfo};
+use crate::client::{self, DownloadResult, RemoteShareInfo, calc_eta_seconds};
 use crate::config::Config;
 use crate::discovery::{Peer, PeerRegistry};
 use crate::server::ServerEvent;
@@ -52,6 +52,8 @@ pub struct UploadState {
     pub done_at: Option<std::time::Instant>,
     pub last_bytes: u64,  // for speed calculation
     pub last_tick: std::time::Instant,
+    pub eta_seconds: f64,
+    pub smoothed_speed: f64,
 }
 
 /// Pending zip-confirmation request shown to the user.
@@ -571,6 +573,11 @@ impl App {
                     ul.last_tick = now;
                     ul.bytes_sent = bytes_sent;
                     ul.total = total;
+
+                    // EMA smoothing
+                    let alpha = 0.2;
+                    (ul.eta_seconds, ul.smoothed_speed) = calc_eta_seconds(ul.smoothed_speed, ul.speed_bps, alpha, ul.total, ul.bytes_sent);
+
                     // Mark done if all bytes sent — don't wait for UploadDone which can be dropped
                     if total > 0 && bytes_sent >= total && !ul.done {
                         ul.done = true;
@@ -590,6 +597,8 @@ impl App {
                         done_at: if total > 0 && bytes_sent >= total { Some(now) } else { None },
                         last_bytes: bytes_sent,
                         last_tick: now,
+                        eta_seconds: 0.0,
+                        smoothed_speed: 0.0,
                     });
                 }
             }
