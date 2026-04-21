@@ -567,7 +567,6 @@ impl App {
             AppEvent::ServerEvent(ServerEvent::UploadProgress { item_id, bytes_sent, total }) => {
                 let now = std::time::Instant::now();
                 if let Some(ul) = self.active_uploads.iter_mut().find(|u| u.id == item_id) {
-                    // Compute instantaneous speed since last progress tick
                     let elapsed = now.duration_since(ul.last_tick).as_secs_f64().max(0.001);
                     let delta = bytes_sent.saturating_sub(ul.last_bytes) as f64;
                     ul.speed_bps = delta / elapsed;
@@ -575,8 +574,12 @@ impl App {
                     ul.last_tick = now;
                     ul.bytes_sent = bytes_sent;
                     ul.total = total;
+                    // Mark done if all bytes sent — don't wait for UploadDone which can be dropped
+                    if total > 0 && bytes_sent >= total && !ul.done {
+                        ul.done = true;
+                        ul.done_at = Some(now);
+                    }
                 } else {
-                    // First progress event for this id — look up the share name
                     let name = self.shares.get(&item_id)
                         .map(|s| s.name.clone())
                         .unwrap_or_else(|| item_id.clone());
@@ -586,8 +589,8 @@ impl App {
                         bytes_sent,
                         total,
                         speed_bps: 0.0,
-                        done: false,
-                        done_at: None,
+                        done: total > 0 && bytes_sent >= total,
+                        done_at: if total > 0 && bytes_sent >= total { Some(now) } else { None },
                         started_at: now,
                         last_bytes: bytes_sent,
                         last_tick: now,
@@ -666,20 +669,19 @@ impl App {
 
                 // Cleanup finished downloads and uploads after 5 seconds visible
                 self.active_downloads.retain(|d| {
-                    if d.done {
-                        if let Some(done_at) = d.done_at {
-                            return done_at.elapsed().as_secs() < 3;
-                        }
-                    }
-                    true
+                    d.done_at.map(|t| t.elapsed().as_secs() < 3).unwrap_or(true)
                 });
-                self.active_uploads.retain(|u| {
-                    if u.done {
-                        if let Some(done_at) = u.done_at {
-                            return done_at.elapsed().as_secs() < 3;
-                        }
+                // For uploads: also catch any stuck at 100% but missing a done_at
+                // (UploadDone event may have been dropped by the broadcast channel)
+                let now = std::time::Instant::now();
+                for ul in self.active_uploads.iter_mut() {
+                    if !ul.done && ul.total > 0 && ul.bytes_sent >= ul.total {
+                        ul.done = true;
+                        ul.done_at = Some(now);
                     }
-                    true
+                }
+                self.active_uploads.retain(|u| {
+                    u.done_at.map(|t| t.elapsed().as_secs() < 3).unwrap_or(true)
                 });
             }
             _ => {}

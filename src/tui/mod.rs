@@ -187,11 +187,16 @@ pub async fn run(
             _ = tick.tick() => {
                 app.shares.prune_expired();
                 // Prune downloads that finished more than 5 seconds ago
-                // (longer window so fast small-file downloads stay visible)
                 app.active_downloads.retain(|d| {
                     d.done_at.map(|t| t.elapsed().as_secs() < 5).unwrap_or(true)
                 });
-                // Same for uploads
+                // Same for uploads — also catch ones stuck at 100% without a done_at
+                for ul in app.active_uploads.iter_mut() {
+                    if !ul.done && ul.total > 0 && ul.bytes_sent >= ul.total {
+                        ul.done = true;
+                        ul.done_at = Some(std::time::Instant::now());
+                    }
+                }
                 app.active_uploads.retain(|u| {
                     u.done_at.map(|t| t.elapsed().as_secs() < 5).unwrap_or(true)
                 });
