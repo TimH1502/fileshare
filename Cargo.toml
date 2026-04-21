@@ -36,8 +36,8 @@ socket2 = "0.6"
 bytes = "1"
 axum-extra = { version = "0.12", features = ["typed-header"] }
 mime_guess = "2"
-nanoid = "0.4"
+nanoid = "0.5"
 arboard = "3"
 qrcode = "0.14"
-rcgen = "0.13"
-axum-server = { version = "0.7", features = ["tls-rustls"] }
+rcgen = "0.14"
+axum-server = { version = "0.8", features = ["tls-rustls"] }
