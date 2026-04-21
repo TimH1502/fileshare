@@ -1,21 +1,27 @@
 # fileshare
 
-A fast, zero-config local network file sharing CLI. Share files and folders with anyone on your LAN — with a live TUI showing peers, their files, and your active shares.
+A fast, zero-config local network file sharing CLI. Share files and folders with anyone on your LAN — with a live TUI showing peers, their files, and your active shares. Also accessible from any browser on the network with full upload, download, and delete support.
 
 ## Features
 
-- **Live TUI** — split screen: peers on the left, your shares on the right, activity log at the bottom
+- **Live TUI** — split screen: peers on the left, your shares on the right, transfers and activity log at the bottom
 - **Auto-discovery** — peers appear automatically via mDNS (no manual IP needed)
-- **Manual peer** — add a peer by IP if mDNS is blocked (`m` in the Peers panel), remove manual peers with `x`
-- **Drag & drop** — drag a file or folder into the terminal to share it instantly
-- **Manual path entry** — press `m` in the My Shares panel to type a path directly (Windows and Unix paths both supported)
-- **Zip confirmation dialog** — when sharing a folder, a popup shows the folder size and file count and asks whether to zip before sharing; zipping is recommended for large folders to save bandwidth
-- **Browser access** — anyone can open `http://<your-ip>:7777` to download without the app
-- **Download notifications** — see when someone downloads your file
+- **Manual peer** — add a peer by IP if mDNS is blocked (`m` in the Peers panel), remove with `x`
+- **Drag & drop** — drag a file or folder into the terminal to share it instantly (Windows, Linux, macOS)
+- **Manual path entry** — press `m` in the My Shares panel to type a path directly
+- **Folder zip dialog** — when sharing a folder, a popup shows size and file count and asks whether to zip; zipping saves bandwidth for large folders
+- **HTTPS browser UI** — open `https://<your-ip>:7777` from any device on the network; plain HTTP on port 7778 redirects automatically to HTTPS
+- **Web upload** — drag files onto the browser UI or use the file picker to upload directly to the sharing host
+- **Web delete** — remove a share from the browser UI with the Delete button (file on disk is untouched)
+- **Live auto-refresh** — the browser UI polls every 4 seconds and updates the file list without a page reload; a live indicator shows connection status
+- **Transfer panel** — active uploads (⬆ orange → green when done) and downloads (⬇ magenta → green when done) shown simultaneously with speed and progress bar; entries fade after 5 seconds
+- **QR code overlay** — press `r` in the TUI to show a QR code for the browser URL; scan with a phone to open instantly
+- **Download notifications** — the TUI activity log shows when someone downloads or uploads a file
 - **Remove shares** — `x` removes a share from the list (the real file is never touched)
-- **Context-aware UI** — the status bar shows only the shortcuts relevant to the currently focused panel
+- **SHA256 checksums** — verified automatically on download; shown per file
+- **Session persistence** — shares are restored from an index file on restart
 - **Optional expiry & download limits** — via CLI flags in `send` mode
-- **SHA256 checksums** — shown per file for integrity verification
+- **Self-signed TLS** — cert generated on first run, stored in config dir, reused on subsequent runs; browser shows a one-time warning
 - **Single binary** — no runtime dependencies, works on Windows, Linux, macOS
 
 ## Build
@@ -67,6 +73,7 @@ The status bar at the bottom always shows the shortcuts available in the current
 | `←` | Peer Files | Go back to Peers |
 | `m` | My Shares | Enter a file/folder path manually |
 | `x` / `Delete` | My Shares | Remove share (file untouched) |
+| `r` | Any | Toggle QR code overlay for browser URL |
 | `?` | Any | Toggle help overlay |
 | `q` / `Ctrl+C` | Any | Quit |
 
@@ -75,16 +82,17 @@ The status bar at the bottom always shows the shortcuts available in the current
 
 ### Sharing files
 
-**Drag & drop:** Drag a file or folder from your file manager into the terminal window. Most modern terminals (Windows Terminal, iTerm2, GNOME Terminal, etc.) will paste the path as text — fileshare detects this and registers the share automatically.
+**Drag & drop:** Drag a file or folder from your file manager into the terminal window. fileshare detects the dropped path and registers the share automatically. Works with paths on any drive (C:, D:, etc. on Windows).
 
-**Manual path entry:** Tab to the **My Shares** panel and press `m`. A dialog opens where you can type the full path to a file or folder and press `Enter`. Both Windows and Unix paths are accepted:
+**Manual path entry:** Tab to the **My Shares** panel and press `m`. A dialog opens where you can type the full path and press `Enter`:
 
 ```
 Windows:  C:\Users\Tim\Downloads\report.pdf
+          D:\Projects\myapp\
 Unix:     /home/tim/downloads/report.pdf
 ```
 
-**Folder zip dialog:** Whenever a folder is added (by drag & drop or manual path), a popup appears showing the folder's total size and file count and asks whether to zip it before sharing:
+**Folder zip dialog:** Whenever a folder is added, a popup appears and asks whether to zip it before sharing:
 
 ```
 ╔══════ 📁 Share Folder ══════════════╗
@@ -99,39 +107,60 @@ Unix:     /home/tim/downloads/report.pdf
 ╚═════════════════════════════════════╝
 ```
 
-Zipping is recommended for large or deeply nested folders because it significantly reduces transfer time. The zip is created in a local cache directory and the original folder is never modified.
+Zipping is recommended for large or deeply nested folders. The zip is created in a local cache directory and the original folder is never modified.
+
+### Browser UI
+
+Open `https://<your-ip>:7777` from any browser on the network. On the first visit your browser will show a security warning about the self-signed certificate — click **Advanced → Proceed** (or equivalent). The browser remembers the exception for 10 years.
+
+
+**From the browser you can:**
+- Download any shared file with one click
+- Upload files by dragging them onto the upload zone or using the file picker — per-file progress bars show upload speed; the file list updates automatically on completion
+- Delete a share with the **✕ Delete** button (removes from the share list only; file on disk is untouched)
+
+### QR code
+
+Press `r` in the TUI to open a QR code overlay showing the HTTPS URL for the browser UI. Scan it with a phone to open the page without typing the IP address. Press `r` or `Esc` to close.
 
 ### Managing peers
 
 Peers on the same network are discovered automatically. If auto-discovery doesn't work (corporate Wi-Fi, VMs, VPNs), add a peer manually:
 
 1. Press `Tab` until the **Peers** panel is focused
-2. Press `m` and enter the peer's IP address (e.g. `192.168.1.42` or `192.168.1.42:7778`)
+2. Press `m` and enter the peer's IP address (e.g. `192.168.1.42` or `192.168.1.42:7777`)
 3. Press `Enter`
 
-Manually added peers are marked with a `[m]` tag in the list. To remove one, select it and press `x`.
+Manually added peers are marked with `[m]` in the list. To remove one, select it and press `x`.
 
 ### Config
 
 Saved at:
-- Linux/macOS: `~/.config/fileshare/config.toml`
+- Linux: `~/.config/fileshare/config.toml`
+- macOS: `~/Library/Application Support/fileshare/config.toml`
 - Windows: `%APPDATA%\fileshare\config.toml`
 
 ```toml
 username = "alice"
 port = 7777
-download_dir = "/home/alice/Downloads/fileshare"
+download_dir = "/home/alice/Downloads"
 ```
 
-Reset with:
+TLS cert and key are stored alongside the config (`cert.pem`, `key.pem`) and reused on every startup.
+
+A debug log is written to `debug.log` in the same directory during startup — useful for diagnosing path or config issues.
+
+Reset config with:
 ```bash
 ./fileshare reset
 ```
 
 ## Network requirements
 
-- Port `7777` (TCP) — file serving & browser UI  
-- Port `7778` (UDP) — peer discovery (mDNS multicast `224.0.0.251`)
+| Port | Protocol | Purpose |
+|------|----------|---------|
+| `7777` | TCP | HTTPS file server and browser UI |
+| `5353` | UDP | mDNS peer discovery (multicast `224.0.0.251`) |
 
 If multicast is blocked, use `m` in the Peers panel to add peers manually by IP.
 
@@ -140,17 +169,18 @@ If multicast is blocked, use `m` in the Peers panel to add peers manually by IP.
 ```
 src/
 ├── main.rs         Entry point, CLI, task orchestration
-├── config.rs       Load/save config.toml
+├── config.rs       Load/save config.toml, debug logging
+├── tls.rs          Self-signed cert generation and loading (rcgen + rustls)
 ├── shares.rs       In-memory share registry, folder analysis, zip logic
 ├── discovery.rs    mDNS announce + listen
-├── server.rs       axum HTTP server (file serving + browser UI)
-├── client.rs       HTTP download with progress reporting
+├── server.rs       axum HTTPS server — file serving, upload, delete, browser UI
+├── client.rs       HTTPS download with progress reporting and SHA256 verification
 └── tui/
     ├── mod.rs      Terminal setup, event loop, drag-and-drop path detection
-    ├── app.rs      App state machine, key handling, dialog state
-    └── ui.rs       ratatui layout, widgets, and overlays
+    ├── app.rs      App state machine, key handling, dialog state, transfer tracking
+    └── ui.rs       ratatui layout, widgets, overlays (QR code, help, zip confirm, transfers)
 ```
 
 ## Security note
 
-This is a **LAN-only tool** for trusted networks. The server binds to all interfaces (`0.0.0.0`) but is designed for local use. Do not use on public networks without a firewall.
+This tool is designed for **trusted local networks**. The HTTPS server binds to all interfaces (`0.0.0.0`). The self-signed certificate is accepted by the CLI client unconditionally (both ends are yours), and browsers show a one-time warning on first visit. Do not expose port 7777 to the public internet.
