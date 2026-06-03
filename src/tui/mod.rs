@@ -141,12 +141,16 @@ pub async fn run(
     let mut crossterm_events = EventStream::new();
     let mut tick = tokio::time::interval(Duration::from_millis(100));
 
-    // Forward server events into our event channel
+    // Forward server events into our event channel.
+    // On broadcast::error::RecvError::Lagged, the receiver has automatically
+    // advanced past the dropped messages — just loop and continue receiving.
     let etx = event_tx.clone();
     tokio::spawn(async move {
         loop {
-            if let Ok(ev) = server_events.recv().await {
-                etx.send(AppEvent::ServerEvent(ev)).await.ok();
+            match server_events.recv().await {
+                Ok(ev) => { etx.send(AppEvent::ServerEvent(ev)).await.ok(); }
+                Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => { /* receiver caught up, keep going */ }
+                Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
             }
         }
     });
@@ -212,7 +216,8 @@ pub async fn run(
                             continue;
                         }
                         // Global quit (but not while accumulating a path or in any input mode)
-                        let in_input_mode = app.manual_ip_input.is_some()
+                        let in_input_mode = app.show_qr
+                            || app.manual_ip_input.is_some()
                             || app.manual_path_input.is_some()
                             || app.zip_confirm.is_some();
                         if !accumulating && !in_input_mode
@@ -336,12 +341,29 @@ pub async fn run(
                         }
                     }
                 }
-                // AddShare: manual path entry — route through the same logic as drag & drop
+                // Process this event
                 if let AppEvent::AddShare(ref p) = app_event {
                     let raw = p.to_string_lossy().to_string();
                     try_share_path(&raw, &shares, &event_tx);
                 } else {
                     app.handle_event(app_event);
+                }
+                // Drain any further pending app events without blocking.
+                // Critical for high-frequency progress events (large file transfers
+                // fire hundreds of UploadProgress events/sec) so they don't pile up
+                // and get processed only one-per-100ms-select-iteration.
+                loop {
+                    match event_rx.try_recv() {
+                        Ok(ev) => {
+                            if let AppEvent::AddShare(ref p) = ev {
+                                let raw = p.to_string_lossy().to_string();
+                                try_share_path(&raw, &shares, &event_tx);
+                            } else {
+                                app.handle_event(ev);
+                            }
+                        }
+                        Err(_) => break, // Empty or closed — done draining
+                    }
                 }
             }
         }

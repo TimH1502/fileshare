@@ -134,7 +134,7 @@ async fn run_tui(username_override: Option<String>, port_override: Option<u16>) 
 
     let peers = PeerRegistry::new();
 
-    let (event_tx, event_rx) = broadcast::channel::<ServerEvent>(64);
+    let (event_tx, event_rx) = broadcast::channel::<ServerEvent>(512);
 
     let state = Arc::new(AppState {
         shares: shares.clone(),
