@@ -348,11 +348,9 @@ pub async fn run(
                 } else {
                     app.handle_event(app_event);
                 }
-                // Drain any further pending app events without blocking.
-                // Critical for high-frequency progress events (large file transfers
-                // fire hundreds of UploadProgress events/sec) so they don't pile up
-                // and get processed only one-per-100ms-select-iteration.
-                loop {
+                // Drain further pending app events without blocking, capped at 64
+                // per loop iteration so keyboard input is never starved.
+                for _ in 0..64 {
                     match event_rx.try_recv() {
                         Ok(ev) => {
                             if let AppEvent::AddShare(ref p) = ev {

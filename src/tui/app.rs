@@ -66,6 +66,24 @@ pub struct ZipConfirmRequest {
     pub would_zip: bool,
 }
 
+/// A file being received from the web UI (browser upload).
+#[derive(Debug, Clone)]
+pub struct WebUploadState {
+    pub transfer_id: String,
+    pub name: String,
+    pub bytes_received: u64,
+    pub total: u64,          // 0 when Content-Length was absent
+    pub speed_bps: f64,
+    pub smoothed_speed: f64,
+    pub eta_seconds: f64,
+    pub done: bool,
+    pub failed: bool,
+    pub done_at: Option<std::time::Instant>,
+    pub last_bytes: u64,
+    pub last_tick: std::time::Instant,
+    pub by_addr: String,
+}
+
 pub enum AppEvent {
     Tick,
     PeerFilesLoaded(Vec<RemoteShareInfo>),
@@ -99,6 +117,8 @@ pub struct App {
     pub active_downloads: Vec<DownloadState>,
     /// Active uploads (files being sent to remote peers)
     pub active_uploads: Vec<UploadState>,
+    /// Incoming uploads from the web UI
+    pub web_uploads: Vec<WebUploadState>,
 
     pub show_help: bool,
     pub show_qr: bool,
@@ -132,6 +152,7 @@ impl App {
             log: vec![],
             active_downloads: vec![],
             active_uploads: vec![],
+            web_uploads: vec![],
             show_help: false,
             show_qr: false,
             manual_ip_input: None,
@@ -658,6 +679,60 @@ impl App {
                 self.log(format!("✗ Share failed: {}", e), LogKind::Warning);
             }
 
+            AppEvent::ServerEvent(ServerEvent::WebUploadStarted { transfer_id, filename, total, by_addr }) => {
+                let now = std::time::Instant::now();
+                self.log(
+                    format!("\u{2b06} '{}' upload started from {}", filename, by_addr),
+                    LogKind::Info,
+                );
+                self.web_uploads.push(WebUploadState {
+                    transfer_id,
+                    name: filename,
+                    bytes_received: 0,
+                    total,
+                    speed_bps: 0.0,
+                    smoothed_speed: 0.0,
+                    eta_seconds: 0.0,
+                    done: false,
+                    failed: false,
+                    done_at: None,
+                    last_bytes: 0,
+                    last_tick: now,
+                    by_addr,
+                });
+            }
+            AppEvent::ServerEvent(ServerEvent::WebUploadProgress { transfer_id, bytes_received, total }) => {
+                let now = std::time::Instant::now();
+                if let Some(wu) = self.web_uploads.iter_mut().find(|w| w.transfer_id == transfer_id) {
+                    let elapsed = now.duration_since(wu.last_tick).as_secs_f64().max(0.001);
+                    let delta = bytes_received.saturating_sub(wu.last_bytes) as f64;
+                    wu.speed_bps = delta / elapsed;
+                    wu.last_bytes = bytes_received;
+                    wu.last_tick = now;
+                    wu.bytes_received = bytes_received;
+                    if total > 0 { wu.total = total; }
+
+                    let alpha = 0.2;
+                    (wu.eta_seconds, wu.smoothed_speed) = calc_eta_seconds(wu.smoothed_speed, wu.speed_bps, alpha, wu.total, wu.bytes_received);
+                }
+            }
+            AppEvent::ServerEvent(ServerEvent::WebUploadFinished { transfer_id, share_id: _ }) => {
+                let msg = if let Some(wu) = self.web_uploads.iter_mut().find(|w| w.transfer_id == transfer_id) {
+                    wu.done = true;
+                    wu.done_at = Some(std::time::Instant::now());
+                    if wu.total > 0 { wu.bytes_received = wu.total; }
+                    Some(format!("\u{2714} '{}' received from {} via web UI", wu.name, wu.by_addr))
+                } else { None };
+                if let Some(m) = msg { self.log(m, LogKind::Success); }
+            }
+            AppEvent::ServerEvent(ServerEvent::WebUploadFailed { transfer_id }) => {
+                let msg = if let Some(wu) = self.web_uploads.iter_mut().find(|w| w.transfer_id == transfer_id) {
+                    wu.failed = true;
+                    wu.done_at = Some(std::time::Instant::now());
+                    Some(format!("\u{2717} '{}' upload from {} failed", wu.name, wu.by_addr))
+                } else { None };
+                if let Some(m) = msg { self.log(m, LogKind::Warning); }
+            }
             AppEvent::Tick => {
                 // Auto-refresh peer files every 3 seconds
                 if self.focus == Focus::PeerFiles {
@@ -686,6 +761,10 @@ impl App {
                 }
                 self.active_uploads.retain(|u| {
                     u.done_at.map(|t| t.elapsed().as_secs() < 3).unwrap_or(true)
+                });
+                // Prune finished/failed web uploads after 3 seconds
+                self.web_uploads.retain(|w| {
+                    w.done_at.map(|t| t.elapsed().as_secs() < 3).unwrap_or(true)
                 });
             }
             _ => {}

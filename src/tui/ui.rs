@@ -1,5 +1,5 @@
 use crate::shares::ShareKind;
-use crate::tui::app::{App, DownloadState, Focus, LogKind, UploadState, ZipConfirmRequest};
+use crate::tui::app::{App, DownloadState, Focus, LogKind, UploadState, WebUploadState, ZipConfirmRequest};
 use qrcode::QrCode;
 use ratatui::{
     layout::{Constraint, Direction, Layout, Rect},
@@ -38,7 +38,7 @@ pub fn draw(f: &mut Frame, app: &App) {
 
     draw_title_bar(f, app, root[0]);
     draw_main(f, app, root[1]);
-    draw_transfers_panel(f, &app.active_downloads, &app.active_uploads, root[2]);
+    draw_transfers_panel(f, &app.active_downloads, &app.active_uploads, &app.web_uploads, root[2]);
     draw_log(f, app, root[3]);
     draw_status_bar(f, app, root[4]);
 
@@ -275,14 +275,16 @@ fn draw_peer_files(f: &mut Frame, app: &App, area: Rect) {
 
 /// Renders a dedicated panel showing all active downloads (always visible).
 const UPLOAD_COLOR: Color = Color::Rgb(255, 165, 0);
+const WEB_UPLOAD_COLOR: Color = Color::Rgb(100, 200, 255); // light blue for web UI inbound
 
 fn draw_transfers_panel(
     f: &mut Frame,
     downloads: &[DownloadState],
     uploads: &[UploadState],
+    web_uploads: &[WebUploadState],
     area: Rect,
 ) {
-    let total = downloads.len() + uploads.len();
+    let total = downloads.len() + uploads.len() + web_uploads.len();
     let (title, border_color) = if total == 0 {
         (" Transfers ".to_string(), DIM)
     } else {
@@ -307,12 +309,21 @@ fn draw_transfers_panel(
     }
 
     let mut y = inner.y;
+    // Outbound uploads (peer-to-peer)
     for ul in uploads {
         if y + 3 > inner.y + inner.height { break; }
         let row = Rect { y, height: 3, ..inner };
         draw_transfer_row_upload(f, ul, row);
         y += 3;
     }
+    // Inbound web UI uploads
+    for wu in web_uploads {
+        if y + 3 > inner.y + inner.height { break; }
+        let row = Rect { y, height: 3, ..inner };
+        draw_transfer_row_web_upload(f, wu, row);
+        y += 3;
+    }
+    // Outbound downloads (peer-to-peer)
     for dl in downloads {
         if y + 3 > inner.y + inner.height { break; }
         let row = Rect { y, height: 3, ..inner };
@@ -365,6 +376,49 @@ fn draw_transfer_row_upload(f: &mut Frame, ul: &UploadState, area: Rect) {
             Span::styled(format!("{} ", right_label), Style::default().fg(DIM)),
             Span::styled(format!("{} ", format_eta(ul.eta_seconds)), Style::default().fg(DIM)),
         ]),
+    ];
+    f.render_widget(Paragraph::new(text), area);
+}
+
+fn draw_transfer_row_web_upload(f: &mut Frame, wu: &WebUploadState, area: Rect) {
+    let pct = if wu.done { 1.0 } else if wu.total > 0 {
+        (wu.bytes_received as f64 / wu.total as f64).min(1.0)
+    } else { 0.0 };
+    let bar_width = area.width.saturating_sub(2) as usize;
+    let filled = (pct * bar_width as f64) as usize;
+    let color = if wu.failed { Color::Red } else if wu.done { SUCCESS } else { WEB_UPLOAD_COLOR };
+    let bar: String = "█".repeat(filled) + &"░".repeat(bar_width - filled);
+    let status_label = if wu.failed {
+        "failed".to_string()
+    } else if wu.done {
+        "done".to_string()
+    } else {
+        crate::client::format_speed(wu.speed_bps)
+    };
+    let name_line = Line::from(vec![
+        Span::styled(" ↓ ", Style::default().fg(color).add_modifier(Modifier::BOLD)),
+        Span::styled(wu.name.clone(), Style::default().fg(color).add_modifier(Modifier::BOLD)),
+        Span::styled(format!(" ← {}", wu.by_addr), Style::default().fg(DIM)),
+    ]);
+    let stats_line = if wu.total > 0 {
+        Line::from(vec![
+            Span::styled(format!(" {:.0} % ", pct * 100.0), Style::default().fg(Color::White)),
+            Span::styled(format!("{} ", status_label), Style::default().fg(DIM)),
+            Span::styled(format!("{} ", format_eta(wu.eta_seconds)), Style::default().fg(DIM)),
+        ])
+    } else {
+        Line::from(vec![
+            Span::styled(
+                format!(" {} received ", crate::shares::human_size(wu.bytes_received)),
+                Style::default().fg(Color::White),
+            ),
+            Span::styled(format!("{} ", status_label), Style::default().fg(DIM)),
+        ])
+    };
+    let text = vec![
+        name_line,
+        Line::from(Span::styled(bar, Style::default().fg(color))),
+        stats_line,
     ];
     f.render_widget(Paragraph::new(text), area);
 }

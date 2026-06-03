@@ -1,10 +1,11 @@
 use axum::{
     extract::{DefaultBodyLimit, Multipart, Path, State},
-    http::{header, StatusCode},
+    http::{header, HeaderMap, StatusCode},
     response::{IntoResponse, Json, Response},
     routing::{delete, get, post},
     Router,
 };
+use nanoid::nanoid;
 use serde::Serialize;
 use std::sync::Arc;
 use tokio::sync::broadcast;
@@ -26,6 +27,14 @@ pub enum ServerEvent {
     UploadProgress { item_id: String, bytes_sent: u64, total: u64 },
     UploadDone { item_id: String },
     Deleted { item_name: String },
+    /// A browser/web-UI upload has just started streaming in.
+    WebUploadStarted { transfer_id: String, filename: String, total: u64, by_addr: String },
+    /// Periodic progress while the web-UI upload is streaming in.
+    WebUploadProgress { transfer_id: String, bytes_received: u64, total: u64 },
+    /// The web-UI upload finished (file written, share registered).
+    WebUploadFinished { transfer_id: String, share_id: String },
+    /// The web-UI upload failed mid-stream.
+    WebUploadFailed { transfer_id: String },
 }
 
 #[derive(Serialize)]
@@ -237,8 +246,16 @@ struct UploadResponse {
 async fn upload_file(
     State(state): State<Arc<AppState>>,
     axum::extract::ConnectInfo(addr): axum::extract::ConnectInfo<std::net::SocketAddr>,
+    headers: HeaderMap,
     mut multipart: Multipart,
 ) -> Response {
+    // Best-effort total size from Content-Length header (browsers send this for XHR uploads)
+    let content_length: u64 = headers
+        .get(header::CONTENT_LENGTH)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(0);
+
     while let Ok(Some(field)) = multipart.next_field().await {
         // Accept the first field named "file" (or any field with a filename)
         let filename = match field.file_name() {
@@ -246,12 +263,24 @@ async fn upload_file(
             _ => continue,
         };
 
+        // Generate a transfer ID for TUI progress tracking (before the share ID exists)
+        let transfer_id = nanoid!(8);
+
+        // Notify TUI that an upload is starting
+        state.event_tx.send(ServerEvent::WebUploadStarted {
+            transfer_id: transfer_id.clone(),
+            filename: filename.clone(),
+            total: content_length,
+            by_addr: addr.ip().to_string(),
+        }).ok();
+
         // Stream to a temp file first, then move it into the download dir
         let tmp_path = state.download_dir.join(format!(".upload_tmp_{}", filename));
         let dest_path = state.download_dir.join(&filename);
 
         // Ensure download dir exists
         if let Err(e) = tokio::fs::create_dir_all(&state.download_dir).await {
+            state.event_tx.send(ServerEvent::WebUploadFailed { transfer_id }).ok();
             return Json(UploadResponse {
                 ok: false,
                 name: filename,
@@ -266,6 +295,7 @@ async fn upload_file(
         let mut f = match tokio::fs::File::create(&tmp_path).await {
             Ok(f) => f,
             Err(e) => {
+                state.event_tx.send(ServerEvent::WebUploadFailed { transfer_id }).ok();
                 return Json(UploadResponse {
                     ok: false,
                     name: filename,
@@ -279,11 +309,15 @@ async fn upload_file(
 
         use tokio::io::AsyncWriteExt;
         let mut stream = field;
+        let mut bytes_received: u64 = 0;
+        let mut last_report: u64 = 0;
         loop {
             match stream.chunk().await {
                 Ok(Some(chunk)) => {
+                    bytes_received += chunk.len() as u64;
                     if let Err(e) = f.write_all(&chunk).await {
                         tokio::fs::remove_file(&tmp_path).await.ok();
+                        state.event_tx.send(ServerEvent::WebUploadFailed { transfer_id }).ok();
                         return Json(UploadResponse {
                             ok: false,
                             name: filename,
@@ -293,10 +327,20 @@ async fn upload_file(
                         })
                         .into_response();
                     }
+                    // Emit progress every 256 KB
+                    if bytes_received - last_report >= 262_144 {
+                        last_report = bytes_received;
+                        state.event_tx.send(ServerEvent::WebUploadProgress {
+                            transfer_id: transfer_id.clone(),
+                            bytes_received,
+                            total: content_length,
+                        }).ok();
+                    }
                 }
                 Ok(None) => break,
                 Err(e) => {
                     tokio::fs::remove_file(&tmp_path).await.ok();
+                    state.event_tx.send(ServerEvent::WebUploadFailed { transfer_id }).ok();
                     return Json(UploadResponse {
                         ok: false,
                         name: filename,
@@ -313,6 +357,7 @@ async fn upload_file(
         // Rename temp → final destination (atomic on same fs)
         if let Err(e) = tokio::fs::rename(&tmp_path, &dest_path).await {
             tokio::fs::remove_file(&tmp_path).await.ok();
+            state.event_tx.send(ServerEvent::WebUploadFailed { transfer_id }).ok();
             return Json(UploadResponse {
                 ok: false,
                 name: filename,
@@ -336,13 +381,14 @@ async fn upload_file(
                 let name = item.name.clone();
                 let id = item.id.clone();
                 let size_human = item.size_human();
-                state
-                    .event_tx
-                    .send(ServerEvent::Uploaded {
-                        item_name: name.clone(),
-                        by_addr: addr.ip().to_string(),
-                    })
-                    .ok();
+                state.event_tx.send(ServerEvent::WebUploadFinished {
+                    transfer_id,
+                    share_id: id.clone(),
+                }).ok();
+                state.event_tx.send(ServerEvent::Uploaded {
+                    item_name: name.clone(),
+                    by_addr: addr.ip().to_string(),
+                }).ok();
                 Json(UploadResponse {
                     ok: true,
                     name,
@@ -352,22 +398,28 @@ async fn upload_file(
                 })
                 .into_response()
             }
-            Ok(Err(e)) => Json(UploadResponse {
-                ok: false,
-                name: filename,
-                id: String::new(),
-                size_human: String::new(),
-                error: Some(e.to_string()),
-            })
-            .into_response(),
-            Err(e) => Json(UploadResponse {
-                ok: false,
-                name: filename,
-                id: String::new(),
-                size_human: String::new(),
-                error: Some(e.to_string()),
-            })
-            .into_response(),
+            Ok(Err(e)) => {
+                state.event_tx.send(ServerEvent::WebUploadFailed { transfer_id }).ok();
+                Json(UploadResponse {
+                    ok: false,
+                    name: filename,
+                    id: String::new(),
+                    size_human: String::new(),
+                    error: Some(e.to_string()),
+                })
+                .into_response()
+            }
+            Err(e) => {
+                state.event_tx.send(ServerEvent::WebUploadFailed { transfer_id }).ok();
+                Json(UploadResponse {
+                    ok: false,
+                    name: filename,
+                    id: String::new(),
+                    size_human: String::new(),
+                    error: Some(e.to_string()),
+                })
+                .into_response()
+            }
         };
     }
 
