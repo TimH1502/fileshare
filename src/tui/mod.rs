@@ -164,58 +164,57 @@ pub async fn run(
     let _tick_rate = std::time::Duration::from_millis(250);
 
     loop {
-        // Check if the debounce timer has expired — flush pending path buffer
+        // --- Phase 1: flush debounce buffer if timer expired ---
         if let Some(t) = last_key_time {
-        if t.elapsed() >= Duration::from_millis(PATH_DEBOUNCE_MS) && !path_buf.is_empty() {
-            let raw = path_buf.clone();
-            path_buf.clear();
-            last_key_time = None;
-            accumulating = false;
-
-            // NEW LOGIC HERE
-            let deduped = deduplicate_path(&raw);
-            if looks_like_path(&deduped) {
-                try_share_path(&raw, &shares, &event_tx);
-            } else if raw.len() == 1 {
-                // Treat as normal key input
-                let c = raw.chars().next().unwrap();
-                app.handle_key(crossterm::event::KeyEvent::from(KeyCode::Char(c)));
+            if t.elapsed() >= Duration::from_millis(PATH_DEBOUNCE_MS) && !path_buf.is_empty() {
+                let raw = path_buf.clone();
+                path_buf.clear();
+                last_key_time = None;
+                accumulating = false;
+                let deduped = deduplicate_path(&raw);
+                if looks_like_path(&deduped) {
+                    try_share_path(&raw, &shares, &event_tx);
+                } else if raw.len() == 1 {
+                    let c = raw.chars().next().unwrap();
+                    app.handle_key(crossterm::event::KeyEvent::from(KeyCode::Char(c)));
+                }
             }
-            // else: discard or handle as needed
         }
-    }
 
-        terminal.draw(|f| ui::draw(f, &app))?;
-
-        tokio::select! {
-            _ = tick.tick() => {
-                app.shares.prune_expired();
-                // Prune downloads that finished more than 5 seconds ago
-                app.active_downloads.retain(|d| {
-                    d.done_at.map(|t| t.elapsed().as_secs() < 5).unwrap_or(true)
-                });
-                // Same for uploads — also catch ones stuck at 100% without a done_at
-                for ul in app.active_uploads.iter_mut() {
-                    if !ul.done && ul.total > 0 && ul.bytes_sent >= ul.total {
-                        ul.done = true;
-                        ul.done_at = Some(std::time::Instant::now());
+        // --- Phase 2: drain ALL pending app events non-blockingly ---
+        // Progress events flood in at hundreds/sec during active transfers.
+        // Draining them here with try_recv (never blocking) ensures the select!
+        // below is only woken by keyboard, tick, or a new low-freq event ---
+        // so keyboard input is never starved by a full channel.
+        loop {
+            match event_rx.try_recv() {
+                Ok(ev) => {
+                    if let AppEvent::AddShare(ref p) = ev {
+                        let raw = p.to_string_lossy().to_string();
+                        try_share_path(&raw, &shares, &event_tx);
+                    } else {
+                        app.handle_event(ev);
                     }
                 }
-                app.active_uploads.retain(|u| {
-                    u.done_at.map(|t| t.elapsed().as_secs() < 5).unwrap_or(true)
-                });
-
-                let _ = event_tx.send(AppEvent::Tick).await; // send tick for auto file refresh 
+                Err(_) => break,
             }
+        }
+
+        // --- Phase 3: render ---
+        terminal.draw(|f| ui::draw(f, &app))?;
+
+        // --- Phase 4: block until the next key, tick, or new app event ---
+        // Progress events are already drained above, so this select! spends
+        // almost all its time waiting on the keyboard arm.
+        tokio::select! {
+            biased; // always check keyboard first, then tick, then app events
 
             Some(Ok(event)) = crossterm_events.next() => {
                 match event {
                     Event::Key(key) => {
-                        // Only process real key presses (fixes Windows duplication)
                         if key.kind != KeyEventKind::Press {
                             continue;
                         }
-                        // Global quit (but not while accumulating a path or in any input mode)
                         let in_input_mode = app.show_qr
                             || app.manual_ip_input.is_some()
                             || app.manual_path_input.is_some()
@@ -223,45 +222,31 @@ pub async fn run(
                         if !accumulating && !in_input_mode
                             && (key.code == KeyCode::Char('q')
                                 || (key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL)))
-                            {
-                                break;
-                            }
-
-                        // Ctrl+C always quits
+                        {
+                            break;
+                        }
                         if key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL) {
                             break;
                         }
-
                         if key.code == KeyCode::Char('v') && key.modifiers.contains(KeyModifiers::CONTROL) {
-                                if let Ok(mut clipboard) = arboard::Clipboard::new() {
-                                    if let Ok(text) = clipboard.get_text() {
-                                        path_buf.clear();
-                                        last_key_time = None;
-                                        accumulating = false;
-
-                                        try_share_path(&text, &shares, &event_tx);
-                                    }
+                            if let Ok(mut clipboard) = arboard::Clipboard::new() {
+                                if let Ok(text) = clipboard.get_text() {
+                                    path_buf.clear();
+                                    last_key_time = None;
+                                    accumulating = false;
+                                    try_share_path(&text, &shares, &event_tx);
                                 }
-                                continue;
+                            }
+                            continue;
                         }
-
                         match key.code {
                             KeyCode::Char(c) => {
-                                // '/' or '\' → definitely starting a path
                                 let is_path_start = c == '/' || c == '\\';
-                                // Single letter could be a Windows drive letter (C:\ D:\…)
-                                // We speculate and wait for the second char to confirm.
                                 let is_letter = c.is_ascii_alphabetic();
-
                                 if accumulating || (!path_buf.is_empty()) {
-                                    // Already accumulating — check if prev buffer is a lone
-                                    // letter and this char is NOT ':', meaning it's a normal
-                                    // keystroke like 'jk' — flush and handle normally.
                                     let prev_is_lone_letter = path_buf.len() == 1
                                         && path_buf.chars().next().map(|ch| ch.is_ascii_alphabetic()).unwrap_or(false);
                                     if prev_is_lone_letter && c != ':' && !accumulating {
-                                        // Not a drive letter — flush the buffered letter as key,
-                                        // then handle current char normally too.
                                         let lone = path_buf.chars().next().unwrap();
                                         path_buf.clear();
                                         last_key_time = None;
@@ -274,14 +259,13 @@ pub async fn run(
                                 } else if (is_path_start || is_letter) && !in_input_mode {
                                     path_buf.push(c);
                                     last_key_time = Some(Instant::now());
-                                    accumulating = false; // tentative
+                                    accumulating = false;
                                 } else {
                                     app.handle_key(key);
                                 }
                             }
                             KeyCode::Enter => {
                                 if !path_buf.is_empty() {
-                                    // User typed a path and pressed Enter
                                     let raw = path_buf.clone();
                                     path_buf.clear();
                                     last_key_time = None;
@@ -304,12 +288,8 @@ pub async fn run(
                                 if path_buf.is_empty() {
                                     app.handle_key(key);
                                 }
-                                // If accumulating, non-char keys (shift etc) are ignored
                             }
                         }
-
-                        // After accumulating enough chars, check if it looks like a path
-                        // so we can set the accumulating flag and stop routing to handle_key
                         if !path_buf.is_empty() && path_buf.len() >= 2 {
                             let deduped = deduplicate_path(&path_buf);
                             if looks_like_path(&deduped) || looks_like_path(&path_buf) {
@@ -318,7 +298,6 @@ pub async fn run(
                         }
                     }
                     Event::Paste(text) => {
-                        // Modern terminals send a proper Paste event — handle directly
                         path_buf.clear();
                         last_key_time = None;
                         accumulating = false;
@@ -328,45 +307,37 @@ pub async fn run(
                 }
             }
 
-            Some(app_event) = event_rx.recv() => {
-                // If a single-char buffer didn't grow into a path, flush it as-is before
-                // processing the next app event (rare edge case)
-                if !path_buf.is_empty() && !accumulating {
-                    if let Some(t) = last_key_time {
-                        if t.elapsed() >= Duration::from_millis(PATH_DEBOUNCE_MS) {
-                            let raw = path_buf.clone();
-                            path_buf.clear();
-                            last_key_time = None;
-                            let _ = raw;
-                        }
+            _ = tick.tick() => {
+                app.shares.prune_expired();
+                app.active_downloads.retain(|d| {
+                    d.done_at.map(|t| t.elapsed().as_secs() < 5).unwrap_or(true)
+                });
+                for ul in app.active_uploads.iter_mut() {
+                    if !ul.done && ul.total > 0 && ul.bytes_sent >= ul.total {
+                        ul.done = true;
+                        ul.done_at = Some(std::time::Instant::now());
                     }
                 }
-                // Process this event
-                if let AppEvent::AddShare(ref p) = app_event {
+                app.active_uploads.retain(|u| {
+                    u.done_at.map(|t| t.elapsed().as_secs() < 5).unwrap_or(true)
+                });
+                let _ = event_tx.send(AppEvent::Tick).await;
+            }
+
+            // Wake the loop when a new low-frequency event arrives after
+            // the Phase 2 drain emptied the channel (e.g. share added,
+            // peer discovered). We must handle it here because recv() already
+            // removed it from the channel.
+            Some(ev) = event_rx.recv() => {
+                if let AppEvent::AddShare(ref p) = ev {
                     let raw = p.to_string_lossy().to_string();
                     try_share_path(&raw, &shares, &event_tx);
                 } else {
-                    app.handle_event(app_event);
-                }
-                // Drain further pending app events without blocking, capped at 64
-                // per loop iteration so keyboard input is never starved.
-                for _ in 0..64 {
-                    match event_rx.try_recv() {
-                        Ok(ev) => {
-                            if let AppEvent::AddShare(ref p) = ev {
-                                let raw = p.to_string_lossy().to_string();
-                                try_share_path(&raw, &shares, &event_tx);
-                            } else {
-                                app.handle_event(ev);
-                            }
-                        }
-                        Err(_) => break, // Empty or closed — done draining
-                    }
+                    app.handle_event(ev);
                 }
             }
         }
     }
-
     disable_raw_mode()?;
     execute!(terminal.backend_mut(), LeaveAlternateScreen)?;
     terminal.show_cursor()?;

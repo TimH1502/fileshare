@@ -110,7 +110,7 @@ pub async fn download_file(
         let mut last_update = Instant::now();
 
         let mut smoothed_speed = 0.0;
-        let alpha = 0.2;
+        let alpha = 0.15; // gentler EMA -- more history weight
 
         while let Some(chunk) = stream.next().await {
             let chunk = chunk?;
@@ -134,7 +134,7 @@ pub async fn download_file(
             let eta_seconds;
             (eta_seconds, smoothed_speed) = calc_eta_seconds(smoothed_speed, new_speed, alpha, total, downloaded);
 
-            if last_update.elapsed() >= tokio::time::Duration::from_millis(100) {
+            if last_update.elapsed() >= tokio::time::Duration::from_millis(500) {
                 let _ = progress_tx.try_send(DownloadProgress {
                     bytes_downloaded: downloaded,
                     total_bytes: total,

@@ -333,38 +333,47 @@ fn draw_transfers_panel(
 }
 
 fn draw_transfer_row_download(f: &mut Frame, dl: &DownloadState, area: Rect) {
-    let pct = if dl.done { 1.0 } else if dl.total > 0 {
+    // Cancelled: freeze bar at actual progress, show red
+    let pct = if dl.total > 0 {
         (dl.bytes_done as f64 / dl.total as f64).min(1.0)
     } else { 0.0 };
     let bar_width = area.width.saturating_sub(2) as usize;
     let filled = (pct * bar_width as f64) as usize;
-    let color = if dl.done { SUCCESS } else { DOWNLOAD_COLOR };
+    let color = if dl.cancelled { Color::Red } else if dl.done { SUCCESS } else { DOWNLOAD_COLOR };
+    let icon_color = if dl.cancelled { Color::Red } else { DOWNLOAD_COLOR };
     let bar: String = "█".repeat(filled) + &"░".repeat(bar_width - filled);
-    let right_label = if dl.done { "done".to_string() } else { crate::client::format_speed(dl.speed_bps) };
+    let right_label = if dl.cancelled { "cancelled".to_string() }
+                      else if dl.done { "done".to_string() }
+                      else { crate::client::format_speed(dl.speed_bps) };
     let text = vec![
         Line::from(vec![
-            Span::styled(" ⬇ ", Style::default().fg(DOWNLOAD_COLOR).add_modifier(Modifier::BOLD)),
+            Span::styled(" ⬇ ", Style::default().fg(icon_color).add_modifier(Modifier::BOLD)),
             Span::styled(dl.name.clone(), Style::default().fg(color).add_modifier(Modifier::BOLD)),
         ]),
         Line::from(Span::styled(bar, Style::default().fg(color))),
         Line::from(vec![
             Span::styled(format!(" {:.0} % ", pct * 100.0), Style::default().fg(Color::White)),
-            Span::styled(format!("{} ", right_label), Style::default().fg(DIM)),
-            Span::styled(format!("{} ", format_eta(dl.eta_seconds)), Style::default().fg(DIM)),
+            Span::styled(format!("{} ", right_label), Style::default().fg(if dl.cancelled { Color::Red } else { DIM })),
+            Span::styled(
+                if !dl.done && !dl.cancelled { format!("{} ", format_eta(dl.eta_seconds)) } else { String::new() },
+                Style::default().fg(DIM)
+            ),
         ]),
     ];
     f.render_widget(Paragraph::new(text), area);
 }
 
 fn draw_transfer_row_upload(f: &mut Frame, ul: &UploadState, area: Rect) {
-    let pct = if ul.done { 1.0 } else if ul.total > 0 {
+    let pct = if ul.total > 0 {
         (ul.bytes_sent as f64 / ul.total as f64).min(1.0)
     } else { 0.0 };
     let bar_width = area.width.saturating_sub(2) as usize;
     let filled = (pct * bar_width as f64) as usize;
-    let color = if ul.done { SUCCESS } else { UPLOAD_COLOR };
+    let color = if ul.cancelled { Color::Red } else if ul.done { SUCCESS } else { UPLOAD_COLOR };
     let bar: String = "█".repeat(filled) + &"░".repeat(bar_width - filled);
-    let right_label = if ul.done { "done".to_string() } else { crate::client::format_speed(ul.speed_bps) };
+    let right_label = if ul.cancelled { "cancelled".to_string() }
+                      else if ul.done { "done".to_string() }
+                      else { crate::client::format_speed(ul.speed_bps) };
     let text = vec![
         Line::from(vec![
             Span::styled(" ⬆ ", Style::default().fg(color).add_modifier(Modifier::BOLD)),
@@ -373,8 +382,11 @@ fn draw_transfer_row_upload(f: &mut Frame, ul: &UploadState, area: Rect) {
         Line::from(Span::styled(bar, Style::default().fg(color))),
         Line::from(vec![
             Span::styled(format!(" {:.0} % ", pct * 100.0), Style::default().fg(Color::White)),
-            Span::styled(format!("{} ", right_label), Style::default().fg(DIM)),
-            Span::styled(format!("{} ", format_eta(ul.eta_seconds)), Style::default().fg(DIM)),
+            Span::styled(format!("{} ", right_label), Style::default().fg(if ul.cancelled { Color::Red } else { DIM })),
+            Span::styled(
+                if !ul.done && !ul.cancelled { format!("{} ", format_eta(ul.eta_seconds)) } else { String::new() },
+                Style::default().fg(DIM)
+            ),
         ]),
     ];
     f.render_widget(Paragraph::new(text), area);

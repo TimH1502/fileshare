@@ -37,8 +37,10 @@ pub struct DownloadState {
     pub total: u64,
     pub speed_bps: f64,
     pub done: bool,
+    pub cancelled: bool,
     pub done_at: Option<std::time::Instant>,
     pub eta_seconds: f64,
+    pub last_activity: std::time::Instant,
 }
 
 #[derive(Debug, Clone)]
@@ -49,11 +51,13 @@ pub struct UploadState {
     pub total: u64,
     pub speed_bps: f64,
     pub done: bool,
+    pub cancelled: bool,
     pub done_at: Option<std::time::Instant>,
     pub last_bytes: u64,  // for speed calculation
     pub last_tick: std::time::Instant,
     pub eta_seconds: f64,
     pub smoothed_speed: f64,
+    pub last_display_update: std::time::Instant, // throttle display refresh
 }
 
 /// Pending zip-confirmation request shown to the user.
@@ -81,6 +85,7 @@ pub struct WebUploadState {
     pub done_at: Option<std::time::Instant>,
     pub last_bytes: u64,
     pub last_tick: std::time::Instant,
+    pub last_display_update: std::time::Instant, // throttle display refresh
     pub by_addr: String,
 }
 
@@ -443,8 +448,10 @@ impl App {
             total: file.size,
             speed_bps: 0.0,
             done: false,
+            cancelled: false,
             done_at: None,
             eta_seconds: 0.0,
+            last_activity: std::time::Instant::now(),
         });
 
         self.log(format!("Downloading '{}'…", file.name), LogKind::Info);
@@ -524,6 +531,7 @@ impl App {
                     dl.total = progress.total_bytes;
                     dl.speed_bps = progress.speed_bps;
                     dl.eta_seconds = progress.eta_seconds;
+                    dl.last_activity = std::time::Instant::now();
                 }
             }
             AppEvent::DownloadDone { id, result } => {
@@ -587,17 +595,26 @@ impl App {
             AppEvent::ServerEvent(ServerEvent::UploadProgress { item_id, bytes_sent, total }) => {
                 let now = std::time::Instant::now();
                 if let Some(ul) = self.active_uploads.iter_mut().find(|u| u.id == item_id) {
+                    // Always update position and accumulate into smoothed speed
                     let elapsed = now.duration_since(ul.last_tick).as_secs_f64().max(0.001);
                     let delta = bytes_sent.saturating_sub(ul.last_bytes) as f64;
-                    ul.speed_bps = delta / elapsed;
+                    let instant_speed = delta / elapsed;
                     ul.last_bytes = bytes_sent;
                     ul.last_tick = now;
                     ul.bytes_sent = bytes_sent;
                     ul.total = total;
 
-                    // EMA smoothing
-                    let alpha = 0.2;
-                    (ul.eta_seconds, ul.smoothed_speed) = calc_eta_seconds(ul.smoothed_speed, ul.speed_bps, alpha, ul.total, ul.bytes_sent);
+                    // Heavy EMA -- alpha 0.05 keeps a ~20-sample rolling average
+                    let alpha = 0.05;
+                    let (new_eta, new_smooth) = calc_eta_seconds(ul.smoothed_speed, instant_speed, alpha, ul.total, ul.bytes_sent);
+                    ul.smoothed_speed = new_smooth;
+
+                    // Only push to display fields every 500 ms to prevent flickering
+                    if ul.last_display_update.elapsed().as_millis() >= 500 {
+                        ul.speed_bps = new_smooth;
+                        ul.eta_seconds = new_eta;
+                        ul.last_display_update = now;
+                    }
 
                     // Mark done if all bytes sent — don't wait for UploadDone which can be dropped
                     if total > 0 && bytes_sent >= total && !ul.done {
@@ -615,11 +632,13 @@ impl App {
                         total,
                         speed_bps: 0.0,
                         done: total > 0 && bytes_sent >= total,
+                        cancelled: false,
                         done_at: if total > 0 && bytes_sent >= total { Some(now) } else { None },
                         last_bytes: bytes_sent,
                         last_tick: now,
                         eta_seconds: 0.0,
                         smoothed_speed: 0.0,
+                        last_display_update: std::time::Instant::now(),
                     });
                 }
             }
@@ -698,6 +717,7 @@ impl App {
                     done_at: None,
                     last_bytes: 0,
                     last_tick: now,
+                    last_display_update: std::time::Instant::now(),
                     by_addr,
                 });
             }
@@ -706,14 +726,23 @@ impl App {
                 if let Some(wu) = self.web_uploads.iter_mut().find(|w| w.transfer_id == transfer_id) {
                     let elapsed = now.duration_since(wu.last_tick).as_secs_f64().max(0.001);
                     let delta = bytes_received.saturating_sub(wu.last_bytes) as f64;
-                    wu.speed_bps = delta / elapsed;
+                    let instant_speed = delta / elapsed;
                     wu.last_bytes = bytes_received;
                     wu.last_tick = now;
                     wu.bytes_received = bytes_received;
                     if total > 0 { wu.total = total; }
 
-                    let alpha = 0.2;
-                    (wu.eta_seconds, wu.smoothed_speed) = calc_eta_seconds(wu.smoothed_speed, wu.speed_bps, alpha, wu.total, wu.bytes_received);
+                    // Heavy EMA -- alpha 0.05 keeps a ~20-sample rolling average
+                    let alpha = 0.05;
+                    let (new_eta, new_smooth) = calc_eta_seconds(wu.smoothed_speed, instant_speed, alpha, wu.total, wu.bytes_received);
+                    wu.smoothed_speed = new_smooth;
+
+                    // Only push to display fields every 500 ms to prevent flickering
+                    if wu.last_display_update.elapsed().as_millis() >= 500 {
+                        wu.speed_bps = new_smooth;
+                        wu.eta_seconds = new_eta;
+                        wu.last_display_update = now;
+                    }
                 }
             }
             AppEvent::ServerEvent(ServerEvent::WebUploadFinished { transfer_id, share_id: _ }) => {
@@ -746,23 +775,41 @@ impl App {
                         }
                 }
 
-                // Cleanup finished downloads and uploads after 5 seconds visible
-                self.active_downloads.retain(|d| {
-                    d.done_at.map(|t| t.elapsed().as_secs() < 3).unwrap_or(true)
-                });
-                // For uploads: also catch any stuck at 100% but missing a done_at
-                // (UploadDone event may have been dropped by the broadcast channel)
+                // Mark stale (cancelled/dropped) transfers as done so they get pruned.
+                // Any transfer with no activity for 10 seconds that hasn't finished
+                // normally is considered abandoned.
+                const STALE_SECS: u64 = 10;
                 let now = std::time::Instant::now();
+                for dl in self.active_downloads.iter_mut() {
+                    if !dl.done && !dl.cancelled && dl.last_activity.elapsed().as_secs() >= STALE_SECS {
+                        dl.cancelled = true;
+                        dl.done_at = Some(now);
+                    }
+                }
                 for ul in self.active_uploads.iter_mut() {
+                    if !ul.done && !ul.cancelled && ul.last_tick.elapsed().as_secs() >= STALE_SECS {
+                        ul.cancelled = true;
+                        ul.done_at = Some(now);
+                    }
+                    // Also catch any stuck at 100% without a done_at
                     if !ul.done && ul.total > 0 && ul.bytes_sent >= ul.total {
                         ul.done = true;
                         ul.done_at = Some(now);
                     }
                 }
+                for wu in self.web_uploads.iter_mut() {
+                    if !wu.done && !wu.failed && wu.last_tick.elapsed().as_secs() >= STALE_SECS {
+                        wu.failed = true;
+                        wu.done_at = Some(now);
+                    }
+                }
+                // Prune finished/failed transfers after 3 seconds visible
+                self.active_downloads.retain(|d| {
+                    d.done_at.map(|t| t.elapsed().as_secs() < 3).unwrap_or(true)
+                });
                 self.active_uploads.retain(|u| {
                     u.done_at.map(|t| t.elapsed().as_secs() < 3).unwrap_or(true)
                 });
-                // Prune finished/failed web uploads after 3 seconds
                 self.web_uploads.retain(|w| {
                     w.done_at.map(|t| t.elapsed().as_secs() < 3).unwrap_or(true)
                 });
