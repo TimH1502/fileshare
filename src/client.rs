@@ -3,7 +3,7 @@ use futures::StreamExt;
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
 use std::path::PathBuf;
-use tokio::io::{AsyncSeekExt, AsyncWriteExt};
+use tokio::io::AsyncWriteExt;
 use tokio::time::Instant;
 
 #[derive(Debug, Clone, Deserialize)]
@@ -61,6 +61,7 @@ pub async fn download_file(
     download_dir: &PathBuf,
     progress_tx: tokio::sync::mpsc::Sender<DownloadProgress>,
     retry_tx: tokio::sync::mpsc::Sender<u32>, // sends attempt number on each retry
+    mut pause_rx: tokio::sync::watch::Receiver<bool>,
 ) -> Result<DownloadResult> {
     tokio::fs::create_dir_all(download_dir).await?;
 
@@ -229,6 +230,19 @@ pub async fn download_file(
                     stream_error = Some(e.into());
                     break;
                 }
+            }
+            // Pause: hold the open connection until resumed (or sender dropped)
+            if *pause_rx.borrow() {
+                // Wait until value changes (false=resume) or sender is gone
+                while *pause_rx.borrow() {
+                    if pause_rx.changed().await.is_err() {
+                        break; // sender dropped (download finished/cancelled)
+                    }
+                }
+                // Reset timing so we don't get a bogus speed spike on resume
+                last_time = Instant::now();
+                last_bytes = downloaded;
+                last_update = Instant::now();
             }
         }
 

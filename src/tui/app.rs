@@ -12,6 +12,7 @@ pub enum Focus {
     PeerList,
     PeerFiles,
     MyShares,
+    Transfers,
 }
 
 #[derive(Debug, Clone)]
@@ -29,7 +30,7 @@ pub enum LogKind {
     Download,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub struct DownloadState {
     pub id: String,
     pub name: String,
@@ -39,9 +40,12 @@ pub struct DownloadState {
     pub done: bool,
     pub cancelled: bool,
     pub retrying: bool,
+    pub paused: bool,
     pub done_at: Option<std::time::Instant>,
     pub eta_seconds: f64,
     pub last_activity: std::time::Instant,
+    /// Signals the download task to pause/resume. None for finished transfers.
+    pub pause_tx: Option<tokio::sync::watch::Sender<bool>>,
 }
 
 #[derive(Debug, Clone)]
@@ -127,6 +131,8 @@ pub struct App {
     /// Incoming uploads from the web UI
     pub web_uploads: Vec<WebUploadState>,
 
+    /// Which transfer row is selected (index into active_downloads)
+    pub transfer_cursor: usize,
     pub show_help: bool,
     pub show_qr: bool,
     pub manual_ip_input: Option<String>,
@@ -160,6 +166,7 @@ impl App {
             active_downloads: vec![],
             active_uploads: vec![],
             web_uploads: vec![],
+            transfer_cursor: 0,
             show_help: false,
             show_qr: false,
             manual_ip_input: None,
@@ -281,14 +288,16 @@ impl App {
                 self.focus = match self.focus {
                     Focus::PeerList => Focus::PeerFiles,
                     Focus::PeerFiles => Focus::MyShares,
-                    Focus::MyShares => Focus::PeerList,
+                    Focus::MyShares => Focus::Transfers,
+                    Focus::Transfers => Focus::PeerList,
                 };
             }
             KeyCode::BackTab => {
                 self.focus = match self.focus {
-                    Focus::PeerList => Focus::MyShares,
+                    Focus::PeerList => Focus::Transfers,
                     Focus::PeerFiles => Focus::PeerList,
                     Focus::MyShares => Focus::PeerFiles,
+                    Focus::Transfers => Focus::MyShares,
                 };
             }
             KeyCode::Char('?') | KeyCode::Char('h') => {
@@ -310,6 +319,7 @@ impl App {
                 Focus::PeerList => self.handle_peer_list_key(key),
                 Focus::PeerFiles => self.handle_peer_files_key(key),
                 Focus::MyShares => self.handle_my_shares_key(key),
+                Focus::Transfers => self.handle_transfers_key(key),
             },
         }
     }
@@ -424,6 +434,48 @@ impl App {
         }
     }
 
+    fn handle_transfers_key(&mut self, key: crossterm::event::KeyEvent) {
+        use crossterm::event::KeyCode;
+        let dl_count = self.active_downloads.len();
+        if dl_count == 0 { return; }
+        match key.code {
+            KeyCode::Up | KeyCode::Char('k') => {
+                if self.transfer_cursor > 0 {
+                    self.transfer_cursor -= 1;
+                }
+            }
+            KeyCode::Down | KeyCode::Char('j') => {
+                if self.transfer_cursor + 1 < dl_count {
+                    self.transfer_cursor += 1;
+                }
+            }
+            KeyCode::Char('p') | KeyCode::Char(' ') => {
+                // Clamp cursor in case transfers finished
+                self.transfer_cursor = self.transfer_cursor.min(dl_count.saturating_sub(1));
+                if let Some(dl) = self.active_downloads.get_mut(self.transfer_cursor) {
+                    if dl.done || dl.cancelled { return; }
+                    let new_paused = !dl.paused;
+                    dl.paused = new_paused;
+                    if !new_paused {
+                        // Reset stale timer on resume so it gets a fresh 10s window
+                        dl.last_activity = std::time::Instant::now();
+                    }
+                    if let Some(tx) = &dl.pause_tx {
+                        let _ = tx.send(new_paused);
+                    }
+                    let name = dl.name.clone();
+                    self.log(
+                        format!("{} '{}'",
+                            if new_paused { "⏸ Paused" } else { "▶ Resumed" },
+                            name),
+                        LogKind::Info,
+                    );
+                }
+            }
+            _ => {}
+        }
+    }
+
     fn download_selected(&mut self) {
         let peer = match self.selected_peer() {
             Some(p) => p,
@@ -443,6 +495,9 @@ impl App {
             return;
         }
 
+        // Watch channel: TUI sends true=paused, false=running
+        let (pause_tx, pause_rx) = tokio::sync::watch::channel(false);
+
         self.active_downloads.push(DownloadState {
             id: file.id.clone(),
             name: file.name.clone(),
@@ -452,7 +507,9 @@ impl App {
             done: false,
             cancelled: false,
             retrying: false,
+            paused: false,
             done_at: None,
+            pause_tx: Some(pause_tx),
             eta_seconds: 0.0,
             last_activity: std::time::Instant::now(),
         });
@@ -494,7 +551,7 @@ impl App {
                 }
             });
 
-            match client::download_file(&base_url, &file.id, &file.name, &download_dir, prog_tx, retry_tx)
+            match client::download_file(&base_url, &file.id, &file.name, &download_dir, prog_tx, retry_tx, pause_rx)
                 .await
             {
                 Ok(result) => {
@@ -543,15 +600,12 @@ impl App {
                 self.peer_files_loading = false;
             }
             AppEvent::DownloadRetrying { id, attempt } => {
-                if let Some(dl) = self.active_downloads.iter_mut().find(|d| d.id == id) {
+                let msg = if let Some(dl) = self.active_downloads.iter_mut().find(|w| w.id == id) {
                     dl.retrying = true;
-                    dl.last_activity = std::time::Instant::now(); // reset stale timer
-                    let download_name = dl.name.clone(); 
-                    self.log(
-                        format!("Connection lost, retrying '{}' (attempt {}/{})...", download_name, attempt, 5),
-                        crate::tui::app::LogKind::Warning,
-                    );
-                }
+                    dl.last_activity = std::time::Instant::now();
+                    Some(format!("Connection lost, retrying '{}' (attempt {}/{})...", dl.name, attempt, 5))
+                } else { None };
+                if let Some(m) = msg { self.log(m, LogKind::Warning); }
             }
             AppEvent::DownloadProgress { id, progress } => {
                 if let Some(dl) = self.active_downloads.iter_mut().find(|d| d.id == id) {
@@ -566,6 +620,7 @@ impl App {
             AppEvent::DownloadDone { id, result } => {
                 if let Some(dl) = self.active_downloads.iter_mut().find(|d| d.id == id) {
                     dl.done = true;
+                    dl.pause_tx = None; // drop sender so task can clean up
                     dl.done_at = Some(std::time::Instant::now());
                     // For very small/fast files total may still be 0 if no progress
                     // events fired. Ensure the bar renders as 100% either way.
@@ -810,8 +865,9 @@ impl App {
                 const STALE_SECS: u64 = 10;
                 let now = std::time::Instant::now();
                 for dl in self.active_downloads.iter_mut() {
-                    if !dl.done && !dl.cancelled && dl.last_activity.elapsed().as_secs() >= STALE_SECS {
+                    if !dl.done && !dl.cancelled && !dl.paused && dl.last_activity.elapsed().as_secs() >= STALE_SECS {
                         dl.cancelled = true;
+                        dl.pause_tx = None;
                         dl.done_at = Some(now);
                     }
                 }
@@ -836,6 +892,10 @@ impl App {
                 self.active_downloads.retain(|d| {
                     d.done_at.map(|t| t.elapsed().as_secs() < 3).unwrap_or(true)
                 });
+                // Keep cursor in bounds after pruning
+                if !self.active_downloads.is_empty() {
+                    self.transfer_cursor = self.transfer_cursor.min(self.active_downloads.len() - 1);
+                }
                 self.active_uploads.retain(|u| {
                     u.done_at.map(|t| t.elapsed().as_secs() < 3).unwrap_or(true)
                 });

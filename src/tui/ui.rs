@@ -38,7 +38,7 @@ pub fn draw(f: &mut Frame, app: &App) {
 
     draw_title_bar(f, app, root[0]);
     draw_main(f, app, root[1]);
-    draw_transfers_panel(f, &app.active_downloads, &app.active_uploads, &app.web_uploads, root[2]);
+    draw_transfers_panel(f, &app.active_downloads, &app.active_uploads, &app.web_uploads, app.transfer_cursor, app.focus == Focus::Transfers, root[2]);
     draw_log(f, app, root[3]);
     draw_status_bar(f, app, root[4]);
 
@@ -282,13 +282,19 @@ fn draw_transfers_panel(
     downloads: &[DownloadState],
     uploads: &[UploadState],
     web_uploads: &[WebUploadState],
+    cursor: usize,
+    focused: bool,
     area: Rect,
 ) {
     let total = downloads.len() + uploads.len() + web_uploads.len();
-    let (title, border_color) = if total == 0 {
-        (" Transfers ".to_string(), DIM)
+    let border_color = if focused { ACCENT }
+                       else if total > 0 { DOWNLOAD_COLOR }
+                       else { DIM };
+    let hint = if focused && !downloads.is_empty() { " [p] pause  [↕] select" } else { "" };
+    let title = if total == 0 {
+        format!(" Transfers {}" , hint)
     } else {
-        (format!(" Transfers ({}) ", total), DOWNLOAD_COLOR)
+        format!(" Transfers ({}) {}", total, hint)
     };
 
     let block = Block::default()
@@ -324,15 +330,16 @@ fn draw_transfers_panel(
         y += 3;
     }
     // Outbound downloads (peer-to-peer)
-    for dl in downloads {
+    for (i, dl) in downloads.iter().enumerate() {
         if y + 3 > inner.y + inner.height { break; }
         let row = Rect { y, height: 3, ..inner };
-        draw_transfer_row_download(f, dl, row);
+        let selected = focused && i == cursor;
+        draw_transfer_row_download(f, dl, row, selected);
         y += 3;
     }
 }
 
-fn draw_transfer_row_download(f: &mut Frame, dl: &DownloadState, area: Rect) {
+fn draw_transfer_row_download(f: &mut Frame, dl: &DownloadState, area: Rect, selected: bool) {
     // Cancelled: freeze bar at actual progress, show red
     let pct = if dl.total > 0 {
         (dl.bytes_done as f64 / dl.total as f64).min(1.0)
@@ -340,19 +347,30 @@ fn draw_transfer_row_download(f: &mut Frame, dl: &DownloadState, area: Rect) {
     let bar_width = area.width.saturating_sub(2) as usize;
     let filled = (pct * bar_width as f64) as usize;
     let color = if dl.cancelled { Color::Red }
+               else if dl.paused { Color::DarkGray }
                else if dl.retrying { Color::Yellow }
                else if dl.done { SUCCESS }
                else { DOWNLOAD_COLOR };
-    let icon_color = if dl.cancelled { Color::Red } else if dl.retrying { Color::Yellow } else { DOWNLOAD_COLOR };
+    let icon_color = if dl.cancelled { Color::Red }
+                     else if dl.paused { Color::DarkGray }
+                     else if dl.retrying { Color::Yellow }
+                     else { DOWNLOAD_COLOR };
     let bar: String = "█".repeat(filled) + &"░".repeat(bar_width - filled);
     let right_label = if dl.cancelled { "cancelled".to_string() }
+                      else if dl.paused { "paused".to_string() }
                       else if dl.retrying { "retrying...".to_string() }
                       else if dl.done { "done".to_string() }
                       else { crate::client::format_speed(dl.speed_bps) };
+    let sel_bg = if selected { Color::Rgb(30, 40, 60) } else { Color::Reset };
+    let sel_marker = if selected { "▶ " } else { "  " }; // filled triangle
     let text = vec![
         Line::from(vec![
+            Span::styled(sel_marker, Style::default().fg(ACCENT)),
             Span::styled(" ⬇ ", Style::default().fg(icon_color).add_modifier(Modifier::BOLD)),
             Span::styled(dl.name.clone(), Style::default().fg(color).add_modifier(Modifier::BOLD)),
+            if dl.paused {
+                Span::styled(" ⏸", Style::default().fg(Color::DarkGray))
+            } else { Span::raw("") },
         ]),
         Line::from(Span::styled(bar, Style::default().fg(color))),
         Line::from(vec![
@@ -366,7 +384,7 @@ fn draw_transfer_row_download(f: &mut Frame, dl: &DownloadState, area: Rect) {
             ),
         ]),
     ];
-    f.render_widget(Paragraph::new(text), area);
+    f.render_widget(Paragraph::new(text).style(Style::default().bg(sel_bg)), area);
 }
 
 fn draw_transfer_row_upload(f: &mut Frame, ul: &UploadState, area: Rect) {
@@ -645,6 +663,10 @@ fn draw_status_bar(f: &mut Frame, app: &App, area: Rect) {
             Span::styled("[m] add path  ", Style::default().fg(DIM)),
             Span::styled("drag & drop to add  ", Style::default().fg(DIM)),
         ],
+        Focus::Transfers => vec![
+            Span::styled("[↕/jk] select download  ", Style::default().fg(DIM)),
+            Span::styled("[p/Space] pause—resume  ", Style::default().fg(DIM)),
+        ],
     };
 
     let mut spans = vec![Span::styled(" [Tab] switch panel  ", Style::default().fg(DIM))];
@@ -718,6 +740,11 @@ fn draw_help_overlay(f: &mut Frame, area: Rect) {
             "  m (in My Shares)  Type a path manually",
             Style::default().fg(DIM),
         )),
+        Line::from(""),
+        Line::from(""),
+        Line::from(Span::styled("  Transfers panel (Tab to focus)", Style::default().fg(ACCENT))),
+        Line::from(Span::styled("  ↕ / j/k            Select download", Style::default().fg(DIM))),
+        Line::from(Span::styled("  p / Space          Pause / resume", Style::default().fg(DIM))),
         Line::from(""),
         Line::from(Span::styled("  ?                 Toggle this help", Style::default().fg(DIM))),
         Line::from(Span::styled("  r                 Show QR code for web UI", Style::default().fg(DIM))),
