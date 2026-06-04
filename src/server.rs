@@ -5,6 +5,8 @@ use axum::{
     routing::{delete, get, post},
     Router,
 };
+use tokio::io::{AsyncSeekExt};
+use std::io::SeekFrom;
 use nanoid::nanoid;
 use serde::Serialize;
 use std::sync::Arc;
@@ -139,21 +141,33 @@ async fn download_file(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
     axum::extract::ConnectInfo(addr): axum::extract::ConnectInfo<std::net::SocketAddr>,
+    headers: HeaderMap,
 ) -> Response {
+    // Parse Range header: "bytes=START-" or "bytes=START-END"
+    let range_start: Option<u64> = headers
+        .get(header::RANGE)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|s| s.strip_prefix("bytes="))
+        .and_then(|s| s.split('-').next())
+        .and_then(|s| s.parse().ok());
+
     let item = match state.shares.get(&id) {
         Some(i) if i.is_available() => i,
         Some(_) => return (StatusCode::GONE, "Share is no longer available").into_response(),
         None => return (StatusCode::NOT_FOUND, "Share not found").into_response(),
     };
 
-    state.shares.increment_downloads(&id);
-    state
-        .event_tx
-        .send(ServerEvent::Downloaded {
-            item_name: item.name.clone(),
-            by_addr: addr.ip().to_string(),
-        })
-        .ok();
+    // Only count and log fresh downloads, not range-resume continuations
+    if range_start.is_none() {
+        state.shares.increment_downloads(&id);
+        state
+            .event_tx
+            .send(ServerEvent::Downloaded {
+                item_name: item.name.clone(),
+                by_addr: addr.ip().to_string(),
+            })
+            .ok();
+    }
 
     // FIX: plain unzipped Folder — path is a directory, can't File::open it.
     // Zip it into a temp file on a blocking thread, then stream and clean up.
@@ -190,6 +204,7 @@ async fn download_file(
                         .header(header::CONTENT_DISPOSITION,
                             format!("attachment; filename=\"{}.zip\"", item.name))
                         .header(header::CONTENT_LENGTH, size)
+                        .header(header::ACCEPT_RANGES, "none")
                         .header("X-Checksum-SHA256", &checksum)
                         .body(body)
                         .unwrap()
@@ -201,17 +216,8 @@ async fn download_file(
     }
 
     match tokio::fs::File::open(&item.path).await {
-        Ok(file) => {
-            let progress_stream = ProgressStream {
-                inner: tokio_util::io::ReaderStream::new(file),
-                event_tx: state.event_tx.clone(),
-                item_id: item.id.clone(),
-                bytes_sent: 0,
-                total: item.size,
-                last_report: 0,
-            };
-            let body = axum::body::Body::from_stream(progress_stream);
-
+        Ok(mut file) => {
+            let total = item.size;
             let (content_type, filename) = if matches!(item.kind, ShareKind::ZippedFolder) {
                 ("application/zip".to_string(), format!("{}.zip", item.name))
             } else {
@@ -219,14 +225,49 @@ async fn download_file(
                  item.name.clone())
             };
 
-            Response::builder()
-                .status(StatusCode::OK)
+            // Honour Range requests so browser pause/resume works
+            let (status, start, content_length) = match range_start {
+                Some(start) if start < total => {
+                    if let Err(_) = file.seek(SeekFrom::Start(start)).await {
+                        return (StatusCode::RANGE_NOT_SATISFIABLE, "Seek failed").into_response();
+                    }
+                    (StatusCode::PARTIAL_CONTENT, start, total - start)
+                }
+                Some(start) if start >= total => {
+                    return Response::builder()
+                        .status(StatusCode::RANGE_NOT_SATISFIABLE)
+                        .header(header::CONTENT_RANGE, format!("bytes */{}", total))
+                        .body(axum::body::Body::empty())
+                        .unwrap();
+                }
+                _ => (StatusCode::OK, 0, total),
+            };
+
+            let progress_stream = ProgressStream {
+                inner: tokio_util::io::ReaderStream::new(file),
+                event_tx: state.event_tx.clone(),
+                item_id: item.id.clone(),
+                bytes_sent: start,   // progress already accounts for resumed offset
+                total,
+                last_report: start,
+            };
+            let body = axum::body::Body::from_stream(progress_stream);
+
+            let mut builder = Response::builder()
+                .status(status)
                 .header(header::CONTENT_TYPE, content_type)
                 .header(header::CONTENT_DISPOSITION,
                     format!("attachment; filename=\"{}\"", filename))
-                .header(header::CONTENT_LENGTH, item.size)
-                .header("X-Checksum-SHA256", &item.checksum)
-                .body(body)
+                .header(header::CONTENT_LENGTH, content_length)
+                .header(header::ACCEPT_RANGES, "bytes")
+                .header("X-Checksum-SHA256", &item.checksum);
+            if status == StatusCode::PARTIAL_CONTENT {
+                builder = builder.header(
+                    header::CONTENT_RANGE,
+                    format!("bytes {}-{}/{}", start, total - 1, total),
+                );
+            }
+            builder.body(body)
                 .unwrap()
         }
         Err(_) => (StatusCode::INTERNAL_SERVER_ERROR, "Failed to open file").into_response(),
