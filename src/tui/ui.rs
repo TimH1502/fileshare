@@ -339,10 +339,14 @@ fn draw_transfer_row_download(f: &mut Frame, dl: &DownloadState, area: Rect) {
     } else { 0.0 };
     let bar_width = area.width.saturating_sub(2) as usize;
     let filled = (pct * bar_width as f64) as usize;
-    let color = if dl.cancelled { Color::Red } else if dl.done { SUCCESS } else { DOWNLOAD_COLOR };
-    let icon_color = if dl.cancelled { Color::Red } else { DOWNLOAD_COLOR };
+    let color = if dl.cancelled { Color::Red }
+               else if dl.retrying { Color::Yellow }
+               else if dl.done { SUCCESS }
+               else { DOWNLOAD_COLOR };
+    let icon_color = if dl.cancelled { Color::Red } else if dl.retrying { Color::Yellow } else { DOWNLOAD_COLOR };
     let bar: String = "█".repeat(filled) + &"░".repeat(bar_width - filled);
     let right_label = if dl.cancelled { "cancelled".to_string() }
+                      else if dl.retrying { "retrying...".to_string() }
                       else if dl.done { "done".to_string() }
                       else { crate::client::format_speed(dl.speed_bps) };
     let text = vec![
@@ -353,7 +357,9 @@ fn draw_transfer_row_download(f: &mut Frame, dl: &DownloadState, area: Rect) {
         Line::from(Span::styled(bar, Style::default().fg(color))),
         Line::from(vec![
             Span::styled(format!(" {:.0} % ", pct * 100.0), Style::default().fg(Color::White)),
-            Span::styled(format!("{} ", right_label), Style::default().fg(if dl.cancelled { Color::Red } else { DIM })),
+            Span::styled(format!("{} ", right_label), Style::default().fg(
+                if dl.cancelled { Color::Red } else if dl.retrying { Color::Yellow } else { DIM }
+            )),
             Span::styled(
                 if !dl.done && !dl.cancelled { format!("{} ", format_eta(dl.eta_seconds)) } else { String::new() },
                 Style::default().fg(DIM)

@@ -38,6 +38,7 @@ pub struct DownloadState {
     pub speed_bps: f64,
     pub done: bool,
     pub cancelled: bool,
+    pub retrying: bool,
     pub done_at: Option<std::time::Instant>,
     pub eta_seconds: f64,
     pub last_activity: std::time::Instant,
@@ -96,6 +97,7 @@ pub enum AppEvent {
     DownloadProgress { id: String, progress: client::DownloadProgress },
     DownloadDone { id: String, result: DownloadResult },
     DownloadError { id: String, error: String },
+    DownloadRetrying { id: String, attempt: u32 },
     ServerEvent(ServerEvent),
     AddShare(PathBuf),
     ZipConfirmNeeded(ZipConfirmRequest),
@@ -449,6 +451,7 @@ impl App {
             speed_bps: 0.0,
             done: false,
             cancelled: false,
+            retrying: false,
             done_at: None,
             eta_seconds: 0.0,
             last_activity: std::time::Instant::now(),
@@ -463,8 +466,11 @@ impl App {
 
         tokio::spawn(async move {
             let (prog_tx, mut prog_rx) = tokio::sync::mpsc::channel(32);
+            let (retry_tx, mut retry_rx) = tokio::sync::mpsc::channel::<u32>(8);
             let tx2 = tx.clone();
+            let tx3 = tx.clone();
             let fid2 = file_id.clone();
+            let fid3 = file_id.clone();
 
             tokio::spawn(async move {
                 while let Some(p) = prog_rx.recv().await {
@@ -477,7 +483,18 @@ impl App {
                 }
             });
 
-            match client::download_file(&base_url, &file.id, &file.name, &download_dir, prog_tx)
+            tokio::spawn(async move {
+                while let Some(attempt) = retry_rx.recv().await {
+                    tx3.send(AppEvent::DownloadRetrying {
+                        id: fid3.clone(),
+                        attempt,
+                    })
+                    .await
+                    .ok();
+                }
+            });
+
+            match client::download_file(&base_url, &file.id, &file.name, &download_dir, prog_tx, retry_tx)
                 .await
             {
                 Ok(result) => {
@@ -525,12 +542,24 @@ impl App {
                 self.peer_files = files;
                 self.peer_files_loading = false;
             }
+            AppEvent::DownloadRetrying { id, attempt } => {
+                if let Some(dl) = self.active_downloads.iter_mut().find(|d| d.id == id) {
+                    dl.retrying = true;
+                    dl.last_activity = std::time::Instant::now(); // reset stale timer
+                    let download_name = dl.name.clone(); 
+                    self.log(
+                        format!("Connection lost, retrying '{}' (attempt {}/{})...", download_name, attempt, 5),
+                        crate::tui::app::LogKind::Warning,
+                    );
+                }
+            }
             AppEvent::DownloadProgress { id, progress } => {
                 if let Some(dl) = self.active_downloads.iter_mut().find(|d| d.id == id) {
                     dl.bytes_done = progress.bytes_downloaded;
                     dl.total = progress.total_bytes;
                     dl.speed_bps = progress.speed_bps;
                     dl.eta_seconds = progress.eta_seconds;
+                    dl.retrying = false; // resumed successfully
                     dl.last_activity = std::time::Instant::now();
                 }
             }
