@@ -1,4 +1,4 @@
-use crate::client::{self, DownloadResult, RemoteShareInfo, calc_eta_seconds};
+use crate::client::{self, DownloadControl, DownloadResult, RemoteShareInfo, calc_eta_seconds};
 use crate::config::Config;
 use crate::discovery::{Peer, PeerRegistry};
 use crate::server::ServerEvent;
@@ -45,7 +45,7 @@ pub struct DownloadState {
     pub eta_seconds: f64,
     pub last_activity: std::time::Instant,
     /// Signals the download task to pause/resume. None for finished transfers.
-    pub pause_tx: Option<tokio::sync::watch::Sender<bool>>,
+    pub pause_tx: Option<tokio::sync::watch::Sender<DownloadControl>>,
 }
 
 #[derive(Debug, Clone)]
@@ -461,7 +461,7 @@ impl App {
                         dl.last_activity = std::time::Instant::now();
                     }
                     if let Some(tx) = &dl.pause_tx {
-                        let _ = tx.send(new_paused);
+                        let _ = tx.send(if new_paused { DownloadControl::Paused } else { DownloadControl::Running });
                     }
                     let name = dl.name.clone();
                     self.log(
@@ -469,6 +469,24 @@ impl App {
                             if new_paused { "⏸ Paused" } else { "▶ Resumed" },
                             name),
                         LogKind::Info,
+                    );
+                }
+            }
+            KeyCode::Char('c') | KeyCode::Delete => {
+                self.transfer_cursor = self.transfer_cursor.min(dl_count.saturating_sub(1));
+                if let Some(dl) = self.active_downloads.get_mut(self.transfer_cursor) {
+                    if dl.done || dl.cancelled { return; }
+                    // Signal cancelled, then drop sender
+                    if let Some(tx) = &dl.pause_tx {
+                        let _ = tx.send(DownloadControl::Cancelled);
+                    }
+                    dl.pause_tx = None;
+                    dl.cancelled = true;
+                    dl.done_at = Some(std::time::Instant::now());
+                    let name = dl.name.clone();
+                    self.log(
+                        format!("✖ Cancelled '{}'", name),
+                        LogKind::Warning,
                     );
                 }
             }
@@ -496,7 +514,7 @@ impl App {
         }
 
         // Watch channel: TUI sends true=paused, false=running
-        let (pause_tx, pause_rx) = tokio::sync::watch::channel(false);
+        let (pause_tx, pause_rx) = tokio::sync::watch::channel(DownloadControl::Running);
 
         self.active_downloads.push(DownloadState {
             id: file.id.clone(),
@@ -554,6 +572,7 @@ impl App {
             match client::download_file(&base_url, &file.id, &file.name, &download_dir, prog_tx, retry_tx, pause_rx)
                 .await
             {
+                Ok(result) if result.cancelled => { let _ = result; }
                 Ok(result) => {
                     tx.send(AppEvent::DownloadDone {
                         id: file_id,
@@ -619,8 +638,9 @@ impl App {
             }
             AppEvent::DownloadDone { id, result } => {
                 if let Some(dl) = self.active_downloads.iter_mut().find(|d| d.id == id) {
+                    if dl.cancelled { return; }
                     dl.done = true;
-                    dl.pause_tx = None; // drop sender so task can clean up
+                    dl.pause_tx = None;
                     dl.done_at = Some(std::time::Instant::now());
                     // For very small/fast files total may still be 0 if no progress
                     // events fired. Ensure the bar renders as 100% either way.

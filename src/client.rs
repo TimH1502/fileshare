@@ -35,6 +35,9 @@ pub async fn fetch_peer_shares(base_url: &str) -> Result<ListResponse> {
     Ok(resp)
 }
 
+#[derive(Debug, Clone, PartialEq)]
+pub enum DownloadControl { Running, Paused, Cancelled }
+
 pub struct DownloadProgress {
     pub bytes_downloaded: u64,
     pub total_bytes: u64,
@@ -47,6 +50,8 @@ pub struct DownloadResult {
     pub path: PathBuf,
     /// None if the server didn't send a checksum header.
     pub checksum_ok: Option<bool>,
+    /// True when the download was cancelled by the user (not an error).
+    pub cancelled: bool,
 }
 
 /// Maximum number of resume attempts before giving up.
@@ -61,7 +66,7 @@ pub async fn download_file(
     download_dir: &PathBuf,
     progress_tx: tokio::sync::mpsc::Sender<DownloadProgress>,
     retry_tx: tokio::sync::mpsc::Sender<u32>, // sends attempt number on each retry
-    mut pause_rx: tokio::sync::watch::Receiver<bool>,
+    mut pause_rx: tokio::sync::watch::Receiver<DownloadControl>,
 ) -> Result<DownloadResult> {
     tokio::fs::create_dir_all(download_dir).await?;
 
@@ -122,7 +127,7 @@ pub async fn download_file(
                     .clone()
                     .unwrap_or_else(|| download_dir.join(share_name));
                 tokio::fs::rename(&tmp_path, &dest).await?;
-                return Ok(DownloadResult { path: dest, checksum_ok: None });
+                return Ok(DownloadResult { path: dest, checksum_ok: None, cancelled: false });
             }
             s => {
                 tokio::fs::remove_file(&tmp_path).await.ok();
@@ -231,18 +236,44 @@ pub async fn download_file(
                     break;
                 }
             }
-            // Pause: hold the open connection until resumed (or sender dropped)
-            if *pause_rx.borrow() {
-                // Wait until value changes (false=resume) or sender is gone
-                while *pause_rx.borrow() {
-                    if pause_rx.changed().await.is_err() {
-                        break; // sender dropped (download finished/cancelled)
-                    }
+            // Check for cancel or pause after each chunk
+            let ctrl = pause_rx.borrow().clone();
+            match ctrl {
+                DownloadControl::Cancelled => {
+                    drop(file);
+                    tokio::fs::remove_file(&tmp_path).await.ok();
+                    return Ok(DownloadResult { path: tmp_path, checksum_ok: None, cancelled: true });
                 }
-                // Reset timing so we don't get a bogus speed spike on resume
-                last_time = Instant::now();
-                last_bytes = downloaded;
-                last_update = Instant::now();
+                DownloadControl::Paused => {
+                    // Hold connection until resumed or cancelled
+                    loop {
+                        match pause_rx.changed().await {
+                            Err(_) => {
+                                // Sender dropped without sending Cancelled — treat as cancel
+                                drop(file);
+                                tokio::fs::remove_file(&tmp_path).await.ok();
+                                return Ok(DownloadResult { path: tmp_path, checksum_ok: None, cancelled: true });
+                            }
+                            Ok(_) => {
+                                let new_ctrl = pause_rx.borrow().clone();
+                                if new_ctrl == DownloadControl::Cancelled {
+                                    drop(file);
+                                    tokio::fs::remove_file(&tmp_path).await.ok();
+                                    return Ok(DownloadResult { path: tmp_path, checksum_ok: None, cancelled: true });
+                                }
+                                if new_ctrl == DownloadControl::Running {
+                                    break; // resumed
+                                }
+                                // still Paused — keep waiting
+                            }
+                        }
+                    }
+                    // Reset timing to avoid bogus speed spike on resume
+                    last_time = Instant::now();
+                    last_bytes = downloaded;
+                    last_update = Instant::now();
+                }
+                DownloadControl::Running => {}
             }
         }
 
@@ -261,7 +292,7 @@ pub async fn download_file(
                 if expected.starts_with("dir:") { true } else { actual == expected }
             });
 
-            return Ok(DownloadResult { path: dest, checksum_ok });
+            return Ok(DownloadResult { path: dest, checksum_ok, cancelled: false });
         }
 
         // Stream broke mid-transfer — flush what we have and retry

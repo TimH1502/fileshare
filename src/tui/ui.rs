@@ -290,7 +290,7 @@ fn draw_transfers_panel(
     let border_color = if focused { ACCENT }
                        else if total > 0 { DOWNLOAD_COLOR }
                        else { DIM };
-    let hint = if focused && !downloads.is_empty() { " [p] pause  [↕] select" } else { "" };
+    let hint = if focused && !downloads.is_empty() { " [p] pause  [c] cancel  [↕] select" } else { "" };
     let title = if total == 0 {
         format!(" Transfers {}" , hint)
     } else {
@@ -664,8 +664,9 @@ fn draw_status_bar(f: &mut Frame, app: &App, area: Rect) {
             Span::styled("drag & drop to add  ", Style::default().fg(DIM)),
         ],
         Focus::Transfers => vec![
-            Span::styled("[↕/jk] select download  ", Style::default().fg(DIM)),
-            Span::styled("[p/Space] pause—resume  ", Style::default().fg(DIM)),
+            Span::styled("[↕/jk] select  ", Style::default().fg(DIM)),
+            Span::styled("[p] pause—resume  ", Style::default().fg(DIM)),
+            Span::styled("[c/Del] cancel  ", Style::default().fg(Color::Yellow)),
         ],
     };
 
@@ -745,6 +746,7 @@ fn draw_help_overlay(f: &mut Frame, area: Rect) {
         Line::from(Span::styled("  Transfers panel (Tab to focus)", Style::default().fg(ACCENT))),
         Line::from(Span::styled("  ↕ / j/k            Select download", Style::default().fg(DIM))),
         Line::from(Span::styled("  p / Space          Pause / resume", Style::default().fg(DIM))),
+        Line::from(Span::styled("  c / Delete         Cancel download", Style::default().fg(DIM))),
         Line::from(""),
         Line::from(Span::styled("  ?                 Toggle this help", Style::default().fg(DIM))),
         Line::from(Span::styled("  r                 Show QR code for web UI", Style::default().fg(DIM))),
