@@ -413,7 +413,7 @@ async fn upload_file(
         let shares_c = state.shares.clone();
         let dest_c = dest_path.clone();
         let result = tokio::task::spawn_blocking(move || {
-            shares_c.add(dest_c, None, None, |_| {})
+            shares_c.add(dest_c, None, None, |_name, _done, _total| {})
         })
         .await;
 

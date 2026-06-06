@@ -92,12 +92,9 @@ fn try_share_path(
         } else {
             // Plain file — share immediately
             let etx2 = etx.clone();
-            match shares_c.add(path, None, None, move |folder_name| {
-                let msg = format!("Zipping '{}' — this may take a moment…", folder_name);
-                let etx2 = etx2.clone();
-                tokio::spawn(async move {
-                    let _ = etx2.send(AppEvent::ZipStarted(msg)).await;
-                });
+            match shares_c.add(path, None, None, move |folder_name, done, total| {
+                let folder = folder_name.to_string();
+                let _ = etx2.try_send(AppEvent::ZipProgress { folder, done, total });
             }) {
                 Ok(item) => { etx.send(AppEvent::ShareAdded(item)).await.ok(); }
                 Err(e) => { etx.send(AppEvent::ShareError(e.to_string())).await.ok(); }

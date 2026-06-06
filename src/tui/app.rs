@@ -109,6 +109,8 @@ pub enum AppEvent {
     ShareAdded(crate::shares::SharedItem),
     ShareError(String),
     ZipStarted(String),
+    /// Live progress tick while zipping: folder name, files done, total files
+    ZipProgress { folder: String, done: usize, total: usize },
 }
 
 pub struct App {
@@ -139,6 +141,9 @@ pub struct App {
     pub manual_path_input: Option<String>,
 
     pub zip_confirm: Option<ZipConfirmRequest>,
+
+    /// Index of the live zip-progress log entry (updated in-place each tick)
+    pub zip_progress_log_idx: Option<usize>,
 
     pub event_tx: mpsc::Sender<AppEvent>,
 
@@ -172,6 +177,7 @@ impl App {
             manual_ip_input: None,
             manual_path_input: None,
             zip_confirm: None,
+            zip_progress_log_idx: None,
             event_tx,
             last_peer_refresh: std::time::Instant::now(),
         }
@@ -760,8 +766,9 @@ impl App {
                 );
             }
             AppEvent::ShareAdded(item) => {
+                self.zip_progress_log_idx = None;
                 self.log(
-                    format!("+ Sharing '{}' ({})", item.name, item.size_human()),
+                    format!("✓ Shared '{}' ({})", item.name, item.size_human()),
                     LogKind::Success,
                 );
             }
@@ -778,12 +785,13 @@ impl App {
                         None,
                         None,
                         should_zip,
-                        move |folder_name| {
-                            let msg = format!("Zipping '{}' — this may take a moment…", folder_name);
+                        move |folder_name, done, total| {
+                            // Send a live progress event; the TUI updates the same
+                            // log line in-place so it never spams the log.
+                            let folder = folder_name.to_string();
                             let etx2 = etx2.clone();
-                            tokio::spawn(async move {
-                                let _ = etx2.send(AppEvent::ZipStarted(msg)).await;
-                            });
+                            // Use try_send to avoid blocking the zip thread
+                            let _ = etx2.try_send(AppEvent::ZipProgress { folder, done, total });
                         },
                     ) {
                         Ok(item) => {
@@ -796,9 +804,38 @@ impl App {
                 });
             }
             AppEvent::ZipStarted(msg) => {
+                // Legacy path — keep for any callers that still use add()
                 self.log(msg, LogKind::Info);
             }
+            AppEvent::ZipProgress { folder, done, total } => {
+                let pct = if total > 0 { done * 100 / total } else { 0 };
+                // Build a compact progress bar: [████░░░░] 42/76 (55%)
+                const BAR_W: usize = 20;
+                let filled = if total > 0 { BAR_W * done / total } else { 0 };
+                let bar = format!(
+                    "[{}{}]",
+                    "█".repeat(filled),
+                    "░".repeat(BAR_W - filled),
+                );
+                let msg = format!(
+                    "📦 Zipping '{}' {} {}/{} files ({}%)",
+                    folder, bar, done, total, pct
+                );
+                match self.zip_progress_log_idx {
+                    // Update the existing entry in-place — no new line
+                    Some(idx) if idx < self.log.len() => {
+                        self.log[idx].message = msg;
+                        self.log[idx].timestamp = chrono::Local::now();
+                    }
+                    // First progress event — create the entry and remember its index
+                    _ => {
+                        self.log(msg, LogKind::Info);
+                        self.zip_progress_log_idx = Some(self.log.len() - 1);
+                    }
+                }
+            }
             AppEvent::ShareError(e) => {
+                self.zip_progress_log_idx = None;
                 self.log(format!("✗ Share failed: {}", e), LogKind::Warning);
             }
 

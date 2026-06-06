@@ -220,7 +220,7 @@ fn draw_peer_files(f: &mut Frame, app: &App, area: Rect) {
 
             let icon = match file.kind.as_str() {
                 "folder" => "📁",
-                "zipped_folder" => "🗜 ",
+                "zipped_folder" => "📦 ",
                 _ => "📄",
             };
             let name_style = if !file.available {
@@ -543,7 +543,7 @@ fn draw_my_shares(f: &mut Frame, app: &App, area: Rect) {
             let icon = match item.kind {
                 ShareKind::File => "📄",
                 ShareKind::Folder => "📁",
-                ShareKind::ZippedFolder => "🗜 ",
+                ShareKind::ZippedFolder => "📦 ",
             };
 
             // Show expiry countdown if present
@@ -845,7 +845,7 @@ fn draw_manual_path_overlay(f: &mut Frame, app: &App, area: Rect) {
 fn draw_zip_confirm_overlay(f: &mut Frame, req: &ZipConfirmRequest, area: Rect) {
     use crate::shares::human_size;
 
-    let w = 56u16;
+    let w = 64u16;  // was 56 — needs room for the hint + body text
     let h = 11u16;
     let x = area.width.saturating_sub(w) / 2;
     let y = area.height.saturating_sub(h) / 2;
@@ -900,7 +900,10 @@ fn draw_zip_confirm_overlay(f: &mut Frame, req: &ZipConfirmRequest, area: Rect) 
         .border_style(Style::default().fg(ACCENT))
         .style(Style::default().bg(Color::Rgb(10, 15, 25)));
 
-    f.render_widget(Paragraph::new(text).block(block), popup);
+    f.render_widget(
+        Paragraph::new(text).block(block).wrap(Wrap { trim: false }),
+        popup,
+    );
 }
 
 /// Best-effort: find the first non-loopback IPv4 address on this machine.

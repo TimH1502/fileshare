@@ -214,9 +214,11 @@ async fn run_send(
         .unwrap_or_else(|| std::path::PathBuf::from("."))
         .join("shares.index.json");
     let shares = ShareRegistry::new(cache_dir, index_path);
-    let item = shares.add(path, limit, expires, |name| {
-        println!("Zipping '{}' — this may take a moment…", name);
+    let item = shares.add(path, limit, expires, |name, done, total| {
+        let pct = if total > 0 { done * 100 / total } else { 0 };
+        eprint!("\rZipping '{}' ... {}/{} files ({}%)   ", name, done, total, pct);
     })?;
+    eprintln!();
     println!(
         "Sharing '{}' ({}) — ID: {}",
         item.name,
