@@ -26,7 +26,7 @@ use app::{App, AppEvent};
 /// How long we wait after the last keystroke before deciding a burst is a dropped path.
 const PATH_DEBOUNCE_MS: u64 = 30;
 
-fn deduplicate_path(s: &str) -> String {
+pub(crate) fn deduplicate_path(s: &str) -> String {
     // Windows Terminal drag-and-drop duplicates every character: "CC:\\UUsseerrss\\"
     // Detect by checking if every char pair is identical, then collapse.
     let chars: Vec<char> = s.chars().collect();
@@ -39,7 +39,7 @@ fn deduplicate_path(s: &str) -> String {
     s.to_string()
 }
 
-fn looks_like_path(s: &str) -> bool {
+pub(crate) fn looks_like_path(s: &str) -> bool {
     let s = s.trim();
     // Windows absolute path: C:\... or \\server\...
     // Unix absolute path: /...
@@ -342,4 +342,108 @@ pub async fn run(
     execute!(terminal.backend_mut(), LeaveAlternateScreen)?;
     terminal.show_cursor()?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{deduplicate_path, looks_like_path};
+
+    // -----------------------------------------------------------------------
+    // deduplicate_path
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_deduplicate_windows_terminal_path() {
+        // Windows Terminal doubles every char: C:\Users\Tim -> CC:\\UUsseeerrss\\TTiimm
+        // In Rust string literal, \\ = one backslash, so the doubled path is:
+        assert_eq!(
+            deduplicate_path("CC::\\\\UUsseerrss\\\\TTiimm"),
+            "C:\\Users\\Tim"
+        );
+    }
+    #[test]
+    fn test_deduplicate_already_normal() {
+        let path = "C:\\Users\\Tim\\file.txt";
+        assert_eq!(deduplicate_path(path), path);
+    }
+
+    #[test]
+    fn test_deduplicate_unix_path_unchanged() {
+        let path = "/home/tim/file.txt";
+        assert_eq!(deduplicate_path(path), path);
+    }
+
+    #[test]
+    fn test_deduplicate_short_string_unchanged() {
+        assert_eq!(deduplicate_path("ab"), "ab");
+        assert_eq!(deduplicate_path("aa"), "aa");
+    }
+
+    #[test]
+    fn test_deduplicate_odd_length_unchanged() {
+        assert_eq!(deduplicate_path("aaa"), "aaa");
+        assert_eq!(deduplicate_path("aaaaa"), "aaaaa");
+    }
+
+    #[test]
+    fn test_deduplicate_all_pairs_identical_collapses() {
+        // "aabb" has pairs (a,a) and (b,b) -- all identical, so it collapses to "ab"
+        assert_eq!(deduplicate_path("aabb"), "ab");
+    }
+
+    #[test]
+    fn test_deduplicate_mixed_not_doubled() {
+        // "abcd" has pairs (a,b) and (c,d) -- not identical, must not collapse
+        assert_eq!(deduplicate_path("abcd"), "abcd");
+        assert_eq!(deduplicate_path("abba"), "abba");
+    }
+    // -----------------------------------------------------------------------
+    // looks_like_path
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_looks_like_path_unix() {
+        assert!(looks_like_path("/home/user/file.txt"));
+        assert!(looks_like_path("/"));
+        assert!(looks_like_path("/tmp/foo"));
+    }
+
+    #[test]
+    fn test_looks_like_path_windows_drive() {
+        assert!(looks_like_path("C:\\Users\\Tim\\file.txt"));
+        assert!(looks_like_path("D:\\"));
+        assert!(looks_like_path("Z:\\foo\\bar"));
+    }
+
+    #[test]
+    fn test_looks_like_path_unc() {
+        assert!(looks_like_path("\\\\server\\share"));
+    }
+
+    #[test]
+    fn test_looks_like_path_quoted() {
+        assert!(looks_like_path("\"/home/user/file.txt\""));
+        assert!(looks_like_path("'/home/user/file.txt'"));
+    }
+
+    #[test]
+    fn test_not_a_path_single_key() {
+        assert!(!looks_like_path("j"));
+        assert!(!looks_like_path("k"));
+        assert!(!looks_like_path("q"));
+        assert!(!looks_like_path("r"));
+    }
+
+    #[test]
+    fn test_not_a_path_word() {
+        assert!(!looks_like_path("hello"));
+        assert!(!looks_like_path("myfile.txt"));
+    }
+
+    #[test]
+    fn test_not_a_path_drive_letter_only() {
+        // "C" or "C:" without backslash — not a full path
+        assert!(!looks_like_path("C"));
+        assert!(!looks_like_path("C:"));
+    }
 }

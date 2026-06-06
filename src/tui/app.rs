@@ -927,3 +927,227 @@ impl App {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::client::DownloadControl;
+    use tokio::sync::{mpsc, watch};
+
+    fn make_app() -> App {
+        let (tx, _rx) = mpsc::channel(64);
+        let config = crate::config::Config::default();
+        let peers = crate::discovery::PeerRegistry::new();
+        let tmp = std::env::temp_dir().join("fileshare_test_shares");
+        let shares = crate::shares::ShareRegistry::new(tmp.clone(), tmp.join("index.json"));
+        App::new(config, peers, shares, tx)
+    }
+
+    fn fake_download(name: &str, paused: bool) -> DownloadState {
+        let (pause_tx, _) = watch::channel(DownloadControl::Running);
+        DownloadState {
+            id: name.to_string(),
+            name: name.to_string(),
+            bytes_done: 1024,
+            total: 10_000,
+            speed_bps: 1_000_000.0,
+            done: false,
+            cancelled: false,
+            retrying: false,
+            paused,
+            done_at: None,
+            eta_seconds: 5.0,
+            last_activity: std::time::Instant::now(),
+            pause_tx: Some(pause_tx),
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // Stale / prune logic
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_stale_active_download_gets_cancelled() {
+        let mut app = make_app();
+        let mut dl = fake_download("stale.bin", false);
+        // Wind last_activity back beyond STALE_SECS
+        dl.last_activity = std::time::Instant::now()
+            .checked_sub(std::time::Duration::from_secs(15))
+            .unwrap();
+        app.active_downloads.push(dl);
+
+        app.handle_event(AppEvent::Tick);
+
+        let dl = &app.active_downloads[0];
+        assert!(dl.cancelled, "stale download should be cancelled");
+        assert!(dl.done_at.is_some());
+    }
+
+    #[test]
+    fn test_paused_download_not_stale() {
+        let mut app = make_app();
+        let mut dl = fake_download("paused.bin", true);
+        // Old last_activity — but paused, so must NOT be cancelled
+        dl.last_activity = std::time::Instant::now()
+            .checked_sub(std::time::Duration::from_secs(30))
+            .unwrap();
+        app.active_downloads.push(dl);
+
+        app.handle_event(AppEvent::Tick);
+
+        let dl = &app.active_downloads[0];
+        assert!(!dl.cancelled, "paused download must never be stale-cancelled");
+    }
+
+    #[test]
+    fn test_done_download_pruned_after_3s() {
+        let mut app = make_app();
+        let mut dl = fake_download("done.bin", false);
+        dl.done = true;
+        dl.done_at = Some(
+            std::time::Instant::now()
+                .checked_sub(std::time::Duration::from_secs(4))
+                .unwrap()
+        );
+        app.active_downloads.push(dl);
+
+        app.handle_event(AppEvent::Tick);
+
+        assert!(app.active_downloads.is_empty(), "finished download should be pruned after 3s");
+    }
+
+    #[test]
+    fn test_recent_done_download_not_yet_pruned() {
+        let mut app = make_app();
+        let mut dl = fake_download("recent.bin", false);
+        dl.done = true;
+        dl.done_at = Some(std::time::Instant::now()); // just finished
+        app.active_downloads.push(dl);
+
+        app.handle_event(AppEvent::Tick);
+
+        assert!(!app.active_downloads.is_empty(), "recently finished download should still be visible");
+    }
+
+    // -----------------------------------------------------------------------
+    // Pause / resume / cancel state transitions
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_pause_toggles_state() {
+        let mut app = make_app();
+        app.active_downloads.push(fake_download("file.bin", false));
+        app.focus = Focus::Transfers;
+        app.transfer_cursor = 0;
+
+        let key = crossterm::event::KeyEvent::from(crossterm::event::KeyCode::Char('p'));
+        app.handle_key(key);
+
+        assert!(app.active_downloads[0].paused, "download should be paused after p");
+
+        app.handle_key(key);
+        assert!(!app.active_downloads[0].paused, "download should resume after second p");
+    }
+
+    #[test]
+    fn test_cancel_sets_cancelled_and_drops_sender() {
+        let mut app = make_app();
+        app.active_downloads.push(fake_download("file.bin", false));
+        app.focus = Focus::Transfers;
+        app.transfer_cursor = 0;
+
+        let key = crossterm::event::KeyEvent::from(crossterm::event::KeyCode::Char('c'));
+        app.handle_key(key);
+
+        let dl = &app.active_downloads[0];
+        assert!(dl.cancelled, "download should be cancelled");
+        assert!(dl.done_at.is_some(), "done_at should be set on cancel");
+        assert!(dl.pause_tx.is_none(), "pause_tx should be dropped on cancel");
+    }
+
+    #[test]
+    fn test_cancel_paused_download() {
+        let mut app = make_app();
+        app.active_downloads.push(fake_download("file.bin", true)); // starts paused
+        app.focus = Focus::Transfers;
+        app.transfer_cursor = 0;
+
+        let key = crossterm::event::KeyEvent::from(crossterm::event::KeyCode::Char('c'));
+        app.handle_key(key);
+
+        assert!(app.active_downloads[0].cancelled);
+        assert!(app.active_downloads[0].pause_tx.is_none());
+    }
+
+    #[test]
+    fn test_cannot_cancel_already_done() {
+        let mut app = make_app();
+        let mut dl = fake_download("done.bin", false);
+        dl.done = true;
+        dl.done_at = Some(std::time::Instant::now());
+        app.active_downloads.push(dl);
+        app.focus = Focus::Transfers;
+        app.transfer_cursor = 0;
+
+        let key = crossterm::event::KeyEvent::from(crossterm::event::KeyCode::Char('c'));
+        app.handle_key(key);
+
+        // Should remain done, not switch to cancelled
+        assert!(!app.active_downloads[0].cancelled);
+        assert!(app.active_downloads[0].done);
+    }
+
+    #[test]
+    fn test_cursor_navigation() {
+        let mut app = make_app();
+        app.active_downloads.push(fake_download("a.bin", false));
+        app.active_downloads.push(fake_download("b.bin", false));
+        app.active_downloads.push(fake_download("c.bin", false));
+        app.focus = Focus::Transfers;
+        app.transfer_cursor = 0;
+
+        let down = crossterm::event::KeyEvent::from(crossterm::event::KeyCode::Down);
+        let up = crossterm::event::KeyEvent::from(crossterm::event::KeyCode::Up);
+
+        app.handle_key(down);
+        assert_eq!(app.transfer_cursor, 1);
+        app.handle_key(down);
+        assert_eq!(app.transfer_cursor, 2);
+        // At bottom — should not go past end
+        app.handle_key(down);
+        assert_eq!(app.transfer_cursor, 2);
+        app.handle_key(up);
+        assert_eq!(app.transfer_cursor, 1);
+        // At top — should not go negative
+        app.handle_key(up);
+        app.handle_key(up);
+        assert_eq!(app.transfer_cursor, 0);
+    }
+
+    // -----------------------------------------------------------------------
+    // DownloadDone ignored when already cancelled
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_download_done_ignored_if_cancelled() {
+        let mut app = make_app();
+        let mut dl = fake_download("file.bin", false);
+        dl.cancelled = true;
+        dl.done_at = Some(std::time::Instant::now());
+        app.active_downloads.push(dl);
+
+        // Simulate late DownloadDone arriving after cancel
+        app.handle_event(AppEvent::DownloadDone {
+            id: "file.bin".to_string(),
+            result: crate::client::DownloadResult {
+                path: std::path::PathBuf::from("/fake"),
+                checksum_ok: None,
+                cancelled: false,
+            },
+        });
+
+        // Must remain cancelled, not flipped to done
+        assert!(app.active_downloads[0].cancelled);
+        assert!(!app.active_downloads[0].done);
+    }
+}

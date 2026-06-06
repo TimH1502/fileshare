@@ -10,7 +10,7 @@ path = "src/main.rs"
 
 [dependencies]
 # Async runtime
-tokio = { version = "1", default-features = false, features = ["rt-multi-thread", "macros", "fs", "io-util", "net", "time"] }
+tokio = { version = "1", default-features = false, features = ["rt-multi-thread", "macros", "fs", "io-util", "net", "time", "sync"] }
 tokio-util = { version = "0.7", default-features = false, features = ["io"] }
 futures = { version = "0.3", default-features = false }
 bytes = { version = "1", default-features = false }
@@ -63,3 +63,7 @@ anyhow = { version = "1", default-features = false }
 arboard = { version = "3", default-features = false }
 qrcode = { version = "0.14", default-features = false }
 
+
+[dev-dependencies]
+tempfile = "3"
+axum = { version = "0.8", default-features = false, features = ["tokio", "http1", "json"] }
