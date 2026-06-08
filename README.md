@@ -10,6 +10,7 @@ A fast, zero-config local network file sharing CLI. Share files and folders with
 - **Drag & drop** — drag a file or folder into the terminal to share it instantly (Windows, Linux, macOS)
 - **Manual path entry** — press `m` in the My Shares panel to type a path directly
 - **Folder zip dialog** — when sharing a folder, a popup shows size and file count and asks whether to zip; zipping saves bandwidth for large folders
+- **Parallel zipping** — folders are compressed using all CPU cores (rayon + zlib-ng), reaching speeds comparable to 7-Zip; a live progress bar in the log updates in-place without spamming new lines
 - **HTTPS browser UI** — open `https://<your-ip>:7777` from any device on the network; plain HTTP on port 7778 redirects automatically to HTTPS
 - **Web upload** — drag files onto the browser UI or use the file picker to upload directly to the sharing host
 - **Web delete** — remove a share from the browser UI with the Delete button (file on disk is untouched)
@@ -58,6 +59,12 @@ On first launch you'll be asked for a display name (saved to config).
 ./fileshare send ./project/ --expires 30
 ```
 
+When sharing a folder via `send`, zipping progress is printed to stderr and refreshes in-place:
+
+```
+Zipping 'project' ... 2341/5700 files (41%)
+```
+
 ### Keyboard shortcuts (TUI)
 
 The status bar at the bottom always shows the shortcuts available in the currently focused panel. Full reference:
@@ -74,6 +81,7 @@ The status bar at the bottom always shows the shortcuts available in the current
 | `m` | My Shares | Enter a file/folder path manually |
 | `x` / `Delete` | My Shares | Remove share (file untouched) |
 | `r` | Any | Toggle QR code overlay for browser URL |
+| `u` | Any | Toggle download speed unit: MB/s ↔ Mb/s |
 | `?` | Any | Toggle help overlay |
 | `q` / `Ctrl+C` | Any | Quit |
 
@@ -95,24 +103,31 @@ Unix:     /home/tim/downloads/report.pdf
 **Folder zip dialog:** Whenever a folder is added, a popup appears and asks whether to zip it before sharing:
 
 ```
-╔══════ 📁 Share Folder ══════════════╗
-║ Folder: my_project                  ║
-║ Size:   142.3 MB  (847 files)       ║
-║                                     ║
-║ Zip before sharing?                 ║
-║ Recommended: Yes (large folder)     ║
-║                                     ║
-║  [y] Zip & share  [n] Share as-is  ║
-║  [Esc] Cancel                       ║
-╚═════════════════════════════════════╝
+╔══════ 📁 Share Folder ══════════════════════════════╗
+║ Folder: my_project                                   ║
+║ Size:   142.3 MB  (847 files)                        ║
+║                                                      ║
+║ Zip before sharing?  Recommended: Yes (large folder) ║
+║ Zipping saves bandwidth but takes time for large     ║
+║ folders.                                             ║
+║                                                      ║
+║  [y] Zip & share    [n] Share as-is    [Esc] Cancel  ║
+╚══════════════════════════════════════════════════════╝
 ```
 
-Zipping is recommended for large or deeply nested folders. The zip is created in a local cache directory and the original folder is never modified.
+Zipping is recommended for large or deeply nested folders. The zip is created in a local cache directory and the original folder is never modified. Compression runs in parallel across all CPU cores, so even large folders (1 GB+, 5000+ files) finish in seconds.
+
+While zipping, the log panel shows a live progress bar that refreshes in-place:
+
+```
+📦 Zipping 'my_project' [████████░░░░░░░░░░░░] 423/847 files (50%)
+```
+
+Zipped folders appear in your shares list with a 📦 icon.
 
 ### Browser UI
 
 Open `https://<your-ip>:7777` from any browser on the network. On the first visit your browser will show a security warning about the self-signed certificate — click **Advanced → Proceed** (or equivalent). The browser remembers the exception for 10 years.
-
 
 **From the browser you can:**
 - Download any shared file with one click
@@ -158,8 +173,9 @@ Reset config with:
 ## Network requirements
 
 | Port | Protocol | Purpose |
-|------|----------|---------|
+|------|----------|---------| 
 | `7777` | TCP | HTTPS file server and browser UI |
+| `7778` | TCP | HTTP redirect to HTTPS |
 | `5353` | UDP | mDNS peer discovery (multicast `224.0.0.251`) |
 
 If multicast is blocked, use `m` in the Peers panel to add peers manually by IP.
@@ -171,7 +187,7 @@ src/
 ├── main.rs         Entry point, CLI, task orchestration
 ├── config.rs       Load/save config.toml, debug logging
 ├── tls.rs          Self-signed cert generation and loading (rcgen + rustls)
-├── shares.rs       In-memory share registry, folder analysis, zip logic
+├── shares.rs       In-memory share registry, folder analysis, parallel zip
 ├── discovery.rs    mDNS announce + listen
 ├── server.rs       axum HTTPS server — file serving, upload, delete, browser UI
 ├── client.rs       HTTPS download with progress reporting and SHA256 verification
