@@ -335,6 +335,11 @@ pub async fn run(
             }
         }
     }
+    // Persist UI preferences so they survive across restarts
+    app.config.theme_idx      = app.theme_idx;
+    app.config.speed_unit_bits = app.speed_unit == crate::tui::app::SpeedUnit::Bits;
+    app.config.save().ok();
+
     disable_raw_mode()?;
     execute!(terminal.backend_mut(), LeaveAlternateScreen)?;
     terminal.show_cursor()?;

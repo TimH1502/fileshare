@@ -6,7 +6,7 @@ use sha2::{Digest, Sha256};
 use zip::write::FileOptions;
 use std::collections::HashMap;
 use std::fs;
-use std::io::{BufReader, Read, Write};
+use std::io::{BufReader, Read};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, RwLock};
 use walkdir::WalkDir;

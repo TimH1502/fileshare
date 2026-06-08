@@ -9,6 +9,10 @@ pub struct Config {
     pub username: String,
     pub port: u16,
     pub download_dir: PathBuf,
+    #[serde(default)]
+    pub theme_idx: usize,
+    #[serde(default)]
+    pub speed_unit_bits: bool,  // false = MB/s, true = Mb/s
 }
 
 /// Append a timestamped line to ~/.config/fileshare/debug.log.
@@ -47,6 +51,8 @@ impl Default for Config {
             username: String::new(),
             port: 7777,
             download_dir,
+            theme_idx: 0,
+            speed_unit_bits: false,
         }
     }
 }

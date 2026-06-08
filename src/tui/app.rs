@@ -135,6 +135,110 @@ impl SpeedUnit {
     }
 }
 
+/// All colors needed by the TUI, grouped into one struct so themes can be
+/// swapped at runtime without touching any rendering logic.
+#[derive(Debug, Clone)]
+pub struct Theme {
+    pub name:        &'static str,
+    pub accent:      ratatui::style::Color,   // borders, titles, highlights
+    pub dim:         ratatui::style::Color,   // secondary text, inactive elements
+    pub success:     ratatui::style::Color,   // done / live / checkmark
+    pub warn:        ratatui::style::Color,   // warnings, expiry, retrying
+    pub error:       ratatui::style::Color,   // cancelled, failed
+    pub download:    ratatui::style::Color,   // download progress bars / icons
+    pub upload:      ratatui::style::Color,   // upload progress (peer-to-peer)
+    pub web_upload:  ratatui::style::Color,   // upload from browser
+    pub selected_bg: ratatui::style::Color,   // selected row background
+    pub bar_bg:      ratatui::style::Color,   // title bar + status bar background
+    pub overlay_bg:  ratatui::style::Color,   // popup / overlay background
+    pub text:        ratatui::style::Color,   // primary text
+}
+
+use ratatui::style::Color;
+
+pub const THEMES: &[Theme] = &[
+    // ── Ocean (default) ─────────────────────────────────────────────────────
+    Theme {
+        name:        "Ocean",
+        accent:      Color::Cyan,
+        dim:         Color::DarkGray,
+        success:     Color::Green,
+        warn:        Color::Yellow,
+        error:       Color::Red,
+        download:    Color::Magenta,
+        upload:      Color::Rgb(255, 165, 0),
+        web_upload:  Color::Rgb(100, 200, 255),
+        selected_bg: Color::Rgb(30, 50, 60),
+        bar_bg:      Color::Rgb(15, 20, 30),
+        overlay_bg:  Color::Rgb(10, 15, 25),
+        text:        Color::White,
+    },
+    // ── Dracula ─────────────────────────────────────────────────────────────
+    Theme {
+        name:        "Dracula",
+        accent:      Color::Rgb(189, 147, 249), // purple
+        dim:         Color::Rgb(98, 114, 164),
+        success:     Color::Rgb(80, 250, 123),  // green
+        warn:        Color::Rgb(255, 184, 108), // orange
+        error:       Color::Rgb(255, 85, 85),   // red
+        download:    Color::Rgb(255, 121, 198), // pink
+        upload:      Color::Rgb(255, 184, 108), // orange
+        web_upload:  Color::Rgb(139, 233, 253), // cyan
+        selected_bg: Color::Rgb(68, 71, 90),
+        bar_bg:      Color::Rgb(33, 34, 44),
+        overlay_bg:  Color::Rgb(22, 22, 30),
+        text:        Color::Rgb(248, 248, 242),
+    },
+    // ── Nord ────────────────────────────────────────────────────────────────
+    Theme {
+        name:        "Nord",
+        accent:      Color::Rgb(136, 192, 208), // frost blue
+        dim:         Color::Rgb(76, 86, 106),
+        success:     Color::Rgb(163, 190, 140), // aurora green
+        warn:        Color::Rgb(235, 203, 139), // aurora yellow
+        error:       Color::Rgb(191, 97, 106),  // aurora red
+        download:    Color::Rgb(180, 142, 173), // aurora purple
+        upload:      Color::Rgb(208, 135, 112), // aurora orange
+        web_upload:  Color::Rgb(143, 188, 187), // teal frost
+        selected_bg: Color::Rgb(59, 66, 82),
+        bar_bg:      Color::Rgb(36, 41, 51),
+        overlay_bg:  Color::Rgb(29, 33, 42),
+        text:        Color::Rgb(229, 233, 240),
+    },
+    // ── Gruvbox ─────────────────────────────────────────────────────────────
+    Theme {
+        name:        "Gruvbox",
+        accent:      Color::Rgb(214, 152, 33),  // bright yellow
+        dim:         Color::Rgb(146, 131, 116),
+        success:     Color::Rgb(152, 151, 26),  // olive green
+        warn:        Color::Rgb(215, 153, 33),  // orange
+        error:       Color::Rgb(204, 36, 29),   // red
+        download:    Color::Rgb(177, 98, 134),  // purple
+        upload:      Color::Rgb(214, 93, 14),   // bright orange
+        web_upload:  Color::Rgb(104, 157, 106), // aqua
+        selected_bg: Color::Rgb(80, 73, 69),
+        bar_bg:      Color::Rgb(40, 36, 32),
+        overlay_bg:  Color::Rgb(29, 26, 24),
+        text:        Color::Rgb(235, 219, 178),
+    },
+    // ── Matrix ──────────────────────────────────────────────────────────────
+    Theme {
+        name:        "Matrix",
+        accent:      Color::Rgb(0, 255, 70),    // bright green
+        dim:         Color::Rgb(0, 100, 30),
+        success:     Color::Rgb(0, 255, 70),
+        warn:        Color::Rgb(180, 255, 0),
+        error:       Color::Rgb(255, 50, 50),
+        download:    Color::Rgb(0, 200, 100),
+        upload:      Color::Rgb(100, 255, 150),
+        web_upload:  Color::Rgb(0, 220, 180),
+        selected_bg: Color::Rgb(0, 40, 15),
+        bar_bg:      Color::Rgb(0, 15, 5),
+        overlay_bg:  Color::Rgb(0, 8, 3),
+        text:        Color::Rgb(180, 255, 200),
+    },
+];
+
 pub struct App {
     pub config: Config,
     pub peers: PeerRegistry,
@@ -170,6 +274,9 @@ pub struct App {
     /// Whether speeds are shown in bytes (MB/s) or bits (Mb/s); toggled with `u`
     pub speed_unit: SpeedUnit,
 
+    /// Index into THEMES; cycled with `t`
+    pub theme_idx: usize,
+
     pub event_tx: mpsc::Sender<AppEvent>,
 
     pub last_peer_refresh: std::time::Instant,
@@ -182,6 +289,14 @@ impl App {
         shares: ShareRegistry,
         event_tx: mpsc::Sender<AppEvent>,
     ) -> Self {
+        let speed_unit = if config.speed_unit_bits {
+            SpeedUnit::Bits
+        } else {
+            SpeedUnit::Bytes
+        };
+
+        let theme_idx = config.theme_idx.min(crate::tui::app::THEMES.len() - 1);
+
         Self {
             config,
             peers,
@@ -203,7 +318,8 @@ impl App {
             manual_path_input: None,
             zip_confirm: None,
             zip_progress_log_idx: None,
-            speed_unit: SpeedUnit::Bytes,
+            speed_unit,
+            theme_idx,
             event_tx,
             last_peer_refresh: std::time::Instant::now(),
         }
@@ -341,6 +457,11 @@ impl App {
             }
             KeyCode::Char('u') => {
                 self.speed_unit = self.speed_unit.toggle();
+            }
+            KeyCode::Char('t') => {
+                self.theme_idx = (self.theme_idx + 1) % crate::tui::app::THEMES.len();
+                let name = crate::tui::app::THEMES[self.theme_idx].name;
+                self.log(format!("Theme: {}", name), LogKind::Info);
             }
             KeyCode::Char('m') => match self.focus {
                 Focus::MyShares => {
