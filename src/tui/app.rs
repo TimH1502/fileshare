@@ -113,6 +113,28 @@ pub enum AppEvent {
     ZipProgress { folder: String, done: usize, total: usize },
 }
 
+/// Whether transfer speeds are displayed in bytes/s (MB/s) or bits/s (Mb/s)
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SpeedUnit {
+    Bytes,  // MB/s, KB/s
+    Bits,   // Mb/s, Kb/s
+}
+
+impl SpeedUnit {
+    pub fn toggle(self) -> Self {
+        match self {
+            SpeedUnit::Bytes => SpeedUnit::Bits,
+            SpeedUnit::Bits  => SpeedUnit::Bytes,
+        }
+    }
+    pub fn label(self) -> &'static str {
+        match self {
+            SpeedUnit::Bytes => "MB/s",
+            SpeedUnit::Bits  => "Mb/s",
+        }
+    }
+}
+
 pub struct App {
     pub config: Config,
     pub peers: PeerRegistry,
@@ -144,6 +166,9 @@ pub struct App {
 
     /// Index of the live zip-progress log entry (updated in-place each tick)
     pub zip_progress_log_idx: Option<usize>,
+
+    /// Whether speeds are shown in bytes (MB/s) or bits (Mb/s); toggled with `u`
+    pub speed_unit: SpeedUnit,
 
     pub event_tx: mpsc::Sender<AppEvent>,
 
@@ -178,6 +203,7 @@ impl App {
             manual_path_input: None,
             zip_confirm: None,
             zip_progress_log_idx: None,
+            speed_unit: SpeedUnit::Bytes,
             event_tx,
             last_peer_refresh: std::time::Instant::now(),
         }
@@ -312,6 +338,9 @@ impl App {
             KeyCode::Char('r') => {
                 self.show_qr = !self.show_qr;
                 self.show_help = false;
+            }
+            KeyCode::Char('u') => {
+                self.speed_unit = self.speed_unit.toggle();
             }
             KeyCode::Char('m') => match self.focus {
                 Focus::MyShares => {

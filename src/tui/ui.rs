@@ -1,5 +1,5 @@
 use crate::shares::ShareKind;
-use crate::tui::app::{App, DownloadState, Focus, LogKind, UploadState, WebUploadState, ZipConfirmRequest};
+use crate::tui::app::{App, DownloadState, Focus, LogKind, SpeedUnit, UploadState, WebUploadState, ZipConfirmRequest};
 use qrcode::QrCode;
 use ratatui::{
     layout::{Constraint, Direction, Layout, Rect},
@@ -38,7 +38,7 @@ pub fn draw(f: &mut Frame, app: &App) {
 
     draw_title_bar(f, app, root[0]);
     draw_main(f, app, root[1]);
-    draw_transfers_panel(f, &app.active_downloads, &app.active_uploads, &app.web_uploads, app.transfer_cursor, app.focus == Focus::Transfers, root[2]);
+    draw_transfers_panel(f, &app.active_downloads, &app.active_uploads, &app.web_uploads, app.transfer_cursor, app.focus == Focus::Transfers, app.speed_unit, root[2]);
     draw_log(f, app, root[3]);
     draw_status_bar(f, app, root[4]);
 
@@ -284,6 +284,7 @@ fn draw_transfers_panel(
     web_uploads: &[WebUploadState],
     cursor: usize,
     focused: bool,
+    speed_unit: SpeedUnit,
     area: Rect,
 ) {
     let total = downloads.len() + uploads.len() + web_uploads.len();
@@ -319,14 +320,14 @@ fn draw_transfers_panel(
     for ul in uploads {
         if y + 3 > inner.y + inner.height { break; }
         let row = Rect { y, height: 3, ..inner };
-        draw_transfer_row_upload(f, ul, row);
+        draw_transfer_row_upload(f, ul, row, speed_unit);
         y += 3;
     }
     // Inbound web UI uploads
     for wu in web_uploads {
         if y + 3 > inner.y + inner.height { break; }
         let row = Rect { y, height: 3, ..inner };
-        draw_transfer_row_web_upload(f, wu, row);
+        draw_transfer_row_web_upload(f, wu, row, speed_unit);
         y += 3;
     }
     // Outbound downloads (peer-to-peer)
@@ -334,12 +335,12 @@ fn draw_transfers_panel(
         if y + 3 > inner.y + inner.height { break; }
         let row = Rect { y, height: 3, ..inner };
         let selected = focused && i == cursor;
-        draw_transfer_row_download(f, dl, row, selected);
+        draw_transfer_row_download(f, dl, row, selected, speed_unit);
         y += 3;
     }
 }
 
-fn draw_transfer_row_download(f: &mut Frame, dl: &DownloadState, area: Rect, selected: bool) {
+fn draw_transfer_row_download(f: &mut Frame, dl: &DownloadState, area: Rect, selected: bool, speed_unit: SpeedUnit) {
     // Cancelled: freeze bar at actual progress, show red
     let pct = if dl.total > 0 {
         (dl.bytes_done as f64 / dl.total as f64).min(1.0)
@@ -360,7 +361,7 @@ fn draw_transfer_row_download(f: &mut Frame, dl: &DownloadState, area: Rect, sel
                       else if dl.paused { "paused".to_string() }
                       else if dl.retrying { "retrying...".to_string() }
                       else if dl.done { "done".to_string() }
-                      else { crate::client::format_speed(dl.speed_bps) };
+                      else { crate::client::format_speed_unit(dl.speed_bps, speed_unit) };
     let sel_bg = if selected { Color::Rgb(30, 40, 60) } else { Color::Reset };
     let sel_marker = if selected { "▶ " } else { "  " }; // filled triangle
     let text = vec![
@@ -387,7 +388,7 @@ fn draw_transfer_row_download(f: &mut Frame, dl: &DownloadState, area: Rect, sel
     f.render_widget(Paragraph::new(text).style(Style::default().bg(sel_bg)), area);
 }
 
-fn draw_transfer_row_upload(f: &mut Frame, ul: &UploadState, area: Rect) {
+fn draw_transfer_row_upload(f: &mut Frame, ul: &UploadState, area: Rect, speed_unit: SpeedUnit) {
     let pct = if ul.total > 0 {
         (ul.bytes_sent as f64 / ul.total as f64).min(1.0)
     } else { 0.0 };
@@ -397,7 +398,7 @@ fn draw_transfer_row_upload(f: &mut Frame, ul: &UploadState, area: Rect) {
     let bar: String = "█".repeat(filled) + &"░".repeat(bar_width - filled);
     let right_label = if ul.cancelled { "cancelled".to_string() }
                       else if ul.done { "done".to_string() }
-                      else { crate::client::format_speed(ul.speed_bps) };
+                      else { crate::client::format_speed_unit(ul.speed_bps, speed_unit) };
     let text = vec![
         Line::from(vec![
             Span::styled(" ⬆ ", Style::default().fg(color).add_modifier(Modifier::BOLD)),
@@ -416,7 +417,7 @@ fn draw_transfer_row_upload(f: &mut Frame, ul: &UploadState, area: Rect) {
     f.render_widget(Paragraph::new(text), area);
 }
 
-fn draw_transfer_row_web_upload(f: &mut Frame, wu: &WebUploadState, area: Rect) {
+fn draw_transfer_row_web_upload(f: &mut Frame, wu: &WebUploadState, area: Rect, speed_unit: SpeedUnit) {
     let pct = if wu.done { 1.0 } else if wu.total > 0 {
         (wu.bytes_received as f64 / wu.total as f64).min(1.0)
     } else { 0.0 };
@@ -429,7 +430,7 @@ fn draw_transfer_row_web_upload(f: &mut Frame, wu: &WebUploadState, area: Rect) 
     } else if wu.done {
         "done".to_string()
     } else {
-        crate::client::format_speed(wu.speed_bps)
+        crate::client::format_speed_unit(wu.speed_bps, speed_unit)
     };
     let name_line = Line::from(vec![
         Span::styled(" ↓ ", Style::default().fg(color).add_modifier(Modifier::BOLD)),
@@ -674,6 +675,10 @@ fn draw_status_bar(f: &mut Frame, app: &App, area: Rect) {
     spans.extend(context_hints);
     spans.push(Span::styled("[?] help  ", Style::default().fg(DIM)));
     spans.push(Span::styled("[r] qr code  ", Style::default().fg(DIM)));
+    spans.push(Span::styled(
+        format!("[u] speed: {}  ", app.speed_unit.label()),
+        Style::default().fg(Color::Cyan),
+    ));
     spans.push(Span::styled("[q] quit  ", Style::default().fg(DIM)));
     spans.push(Span::styled(format!("  DL→ {}", dl_dir), Style::default().fg(DIM)));
 
@@ -750,6 +755,7 @@ fn draw_help_overlay(f: &mut Frame, area: Rect) {
         Line::from(""),
         Line::from(Span::styled("  ?                 Toggle this help", Style::default().fg(DIM))),
         Line::from(Span::styled("  r                 Show QR code for web UI", Style::default().fg(DIM))),
+        Line::from(Span::styled("  u                 Toggle speed unit (MB/s ↔ Mb/s)", Style::default().fg(DIM))),
         Line::from(Span::styled("  q / Ctrl+C        Quit", Style::default().fg(DIM))),
     ];
 

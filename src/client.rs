@@ -337,6 +337,26 @@ pub fn format_speed(bps: f64) -> String {
     }
 }
 
+/// Format a speed in bytes/s using the chosen unit system.
+/// `Bytes` → MB/s / KB/s / B/s (same as `format_speed`)
+/// `Bits`  → Mb/s / Kb/s / b/s  (multiply by 8)
+pub fn format_speed_unit(bps: f64, unit: crate::tui::app::SpeedUnit) -> String {
+    use crate::tui::app::SpeedUnit;
+    match unit {
+        SpeedUnit::Bytes => format_speed(bps),
+        SpeedUnit::Bits => {
+            let bits = bps * 8.0;
+            if bits >= 1_000_000.0 {
+                format!("{:.1} Mb/s", bits / 1_000_000.0)
+            } else if bits >= 1_000.0 {
+                format!("{:.1} Kb/s", bits / 1_000.0)
+            } else {
+                format!("{:.0} b/s", bits)
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
