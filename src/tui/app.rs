@@ -97,6 +97,7 @@ pub struct WebUploadState {
 pub enum AppEvent {
     Tick,
     PeerFilesLoaded(Vec<RemoteShareInfo>),
+    PeerFilesError(String),
     /// Progress update keyed by share id
     DownloadProgress {
         id: String,
@@ -604,8 +605,7 @@ impl App {
                         tx.send(AppEvent::PeerFilesLoaded(resp.items)).await.ok();
                     }
                     Err(e) => {
-                        tx.send(AppEvent::PeerFilesLoaded(vec![])).await.ok();
-                        eprintln!("Failed to fetch peer shares: {}", e);
+                        tx.send(AppEvent::PeerFilesError(e.to_string())).await.ok();
                     }
                 }
             });
@@ -822,6 +822,14 @@ impl App {
             AppEvent::PeerFilesLoaded(files) => {
                 self.peer_files = files;
                 self.peer_files_loading = false;
+            }
+            AppEvent::PeerFilesError(_e) => {
+                // Peer went offline or is unreachable — clear silently.
+                // Write to debug log only; don't spam the activity log on
+                // every refresh tick.
+                self.peer_files = vec![];
+                self.peer_files_loading = false;
+                crate::config::debug_log(&format!("peer files fetch failed: {}", _e));
             }
             AppEvent::DownloadRetrying { id, attempt } => {
                 let msg = if let Some(dl) = self.active_downloads.iter_mut().find(|w| w.id == id) {
