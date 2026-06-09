@@ -452,7 +452,7 @@ fn draw_transfer_row_download(
         Line::from(vec![
             Span::styled(sel_marker, Style::default().fg(th.accent)),
             Span::styled(
-                " ⬇ ",
+                "↓ ",
                 Style::default().fg(icon_color).add_modifier(Modifier::BOLD),
             ),
             Span::styled(
@@ -528,8 +528,9 @@ fn draw_transfer_row_upload(
     };
     let text = vec![
         Line::from(vec![
+            Span::raw("  "),
             Span::styled(
-                " ⬆ ",
+                "↑ ",
                 Style::default().fg(color).add_modifier(Modifier::BOLD),
             ),
             Span::styled(
@@ -592,8 +593,9 @@ fn draw_transfer_row_web_upload(
         crate::client::format_speed_unit(wu.speed_bps, speed_unit)
     };
     let name_line = Line::from(vec![
+        Span::raw("  "),
         Span::styled(
-            " ↓ ",
+            "↓ ",
             Style::default().fg(color).add_modifier(Modifier::BOLD),
         ),
         Span::styled(
