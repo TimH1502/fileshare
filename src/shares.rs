@@ -415,7 +415,7 @@ impl ShareRegistry {
     pub fn list(&self) -> Vec<SharedItem> {
         let store = self.inner.read().unwrap();
         let mut items: Vec<_> = store.values().cloned().collect();
-        items.sort_by(|a, b| b.added_at.cmp(&a.added_at));
+        items.sort_by_key(|b| std::cmp::Reverse(b.added_at));
         items
     }
 

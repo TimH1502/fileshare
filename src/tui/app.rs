@@ -108,7 +108,6 @@ pub enum AppEvent {
     ZipConfirmResult(PathBuf, bool),
     ShareAdded(crate::shares::SharedItem),
     ShareError(String),
-    ZipStarted(String),
     /// Live progress tick while zipping: folder name, files done, total files
     ZipProgress { folder: String, done: usize, total: usize },
 }
@@ -953,15 +952,11 @@ impl App {
                     }
                 });
             }
-            AppEvent::ZipStarted(msg) => {
-                // Legacy path — keep for any callers that still use add()
-                self.log(msg, LogKind::Info);
-            }
             AppEvent::ZipProgress { folder, done, total } => {
-                let pct = if total > 0 { done * 100 / total } else { 0 };
+                let pct = (done * 100).checked_div(total).unwrap_or(0);
                 // Build a compact progress bar: [████░░░░] 42/76 (55%)
                 const BAR_W: usize = 20;
-                let filled = if total > 0 { BAR_W * done / total } else { 0 };
+                let filled = (BAR_W * done).checked_div(total).unwrap_or(0);
                 let bar = format!(
                     "[{}{}]",
                     "█".repeat(filled),
@@ -1036,7 +1031,7 @@ impl App {
                     }
                 }
             }
-            AppEvent::ServerEvent(ServerEvent::WebUploadFinished { transfer_id, share_id: _ }) => {
+            AppEvent::ServerEvent(ServerEvent::WebUploadFinished { transfer_id}) => {
                 let msg = if let Some(wu) = self.web_uploads.iter_mut().find(|w| w.transfer_id == transfer_id) {
                     wu.done = true;
                     wu.done_at = Some(std::time::Instant::now());

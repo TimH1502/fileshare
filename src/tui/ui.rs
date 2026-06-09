@@ -31,7 +31,7 @@ pub fn draw(f: &mut Frame, app: &App) {
 
     draw_title_bar(f, app, th, root[0]);
     draw_main(f, app, th, root[1]);
-    draw_transfers_panel(f, &app.active_downloads, &app.active_uploads, &app.web_uploads, app.transfer_cursor, app.focus == Focus::Transfers, app.speed_unit, th, root[2]);
+    draw_transfers_panel(f, &app.active_downloads, &app.active_uploads, &app.web_uploads, TransferPanelCtx { focused: app.focus == Focus::Transfers, cursor: app.transfer_cursor, speed_unit: app.speed_unit, th }, root[2]);
     draw_log(f, app, th, root[3]);
     draw_status_bar(f, app, th, root[4]);
 
@@ -270,22 +270,29 @@ fn draw_peer_files(f: &mut Frame, app: &App, th: &Theme, area: Rect) {
     f.render_widget(list, inner);
 }
 
+/// Rendering context for the transfers panel — groups the scalar/style
+/// arguments so `draw_transfers_panel` stays under clippy's argument limit.
+struct TransferPanelCtx<'a> {
+    focused:    bool,
+    cursor:     usize,
+    speed_unit: SpeedUnit,
+    th:         &'a Theme,
+}
+
 fn draw_transfers_panel(
     f: &mut Frame,
-    downloads: &[DownloadState],
-    uploads: &[UploadState],
+    downloads:   &[DownloadState],
+    uploads:     &[UploadState],
     web_uploads: &[WebUploadState],
-    cursor: usize,
-    focused: bool,
-    speed_unit: SpeedUnit,
-    th: &Theme,
-    area: Rect,
+    ctx:         TransferPanelCtx<'_>,
+    area:        Rect,
 ) {
     let total = downloads.len() + uploads.len() + web_uploads.len();
-    let border_color = if focused { th.accent }
+    let th = ctx.th;
+    let border_color = if ctx.focused { th.accent }
                        else if total > 0 { th.download }
                        else { th.dim };
-    let hint = if focused && !downloads.is_empty() { " [p] pause  [c] cancel  [↕] select" } else { "" };
+    let hint = if ctx.focused && !downloads.is_empty() { " [p] pause  [c] cancel  [↕] select" } else { "" };
     let title = if total == 0 {
         format!(" Transfers {}" , hint)
     } else {
@@ -314,22 +321,22 @@ fn draw_transfers_panel(
     for ul in uploads {
         if y + 3 > inner.y + inner.height { break; }
         let row = Rect { y, height: 3, ..inner };
-        draw_transfer_row_upload(f, ul, row, speed_unit, th);
+        draw_transfer_row_upload(f, ul, row, ctx.speed_unit, th);
         y += 3;
     }
     // Inbound web UI uploads
     for wu in web_uploads {
         if y + 3 > inner.y + inner.height { break; }
         let row = Rect { y, height: 3, ..inner };
-        draw_transfer_row_web_upload(f, wu, row, speed_unit, th);
+        draw_transfer_row_web_upload(f, wu, row, ctx.speed_unit, th);
         y += 3;
     }
     // Outbound downloads (peer-to-peer)
     for (i, dl) in downloads.iter().enumerate() {
         if y + 3 > inner.y + inner.height { break; }
         let row = Rect { y, height: 3, ..inner };
-        let selected = focused && i == cursor;
-        draw_transfer_row_download(f, dl, row, selected, speed_unit, th);
+        let selected = ctx.focused && i == ctx.cursor;
+        draw_transfer_row_download(f, dl, row, selected, ctx.speed_unit, th);
         y += 3;
     }
 }

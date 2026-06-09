@@ -34,7 +34,7 @@ pub enum ServerEvent {
     /// Periodic progress while the web-UI upload is streaming in.
     WebUploadProgress { transfer_id: String, bytes_received: u64, total: u64 },
     /// The web-UI upload finished (file written, share registered).
-    WebUploadFinished { transfer_id: String, share_id: String },
+    WebUploadFinished { transfer_id: String },
     /// The web-UI upload failed mid-stream.
     WebUploadFailed { transfer_id: String },
 }
@@ -228,7 +228,7 @@ async fn download_file(
             // Honour Range requests so browser pause/resume works
             let (status, start, content_length) = match range_start {
                 Some(start) if start < total => {
-                    if let Err(_) = file.seek(SeekFrom::Start(start)).await {
+                    if file.seek(SeekFrom::Start(start)).await.is_err() {
                         return (StatusCode::RANGE_NOT_SATISFIABLE, "Seek failed").into_response();
                     }
                     (StatusCode::PARTIAL_CONTENT, start, total - start)
@@ -424,7 +424,6 @@ async fn upload_file(
                 let size_human = item.size_human();
                 state.event_tx.send(ServerEvent::WebUploadFinished {
                     transfer_id,
-                    share_id: id.clone(),
                 }).ok();
                 state.event_tx.send(ServerEvent::Uploaded {
                     item_name: name.clone(),

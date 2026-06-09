@@ -183,19 +183,15 @@ pub async fn run(
         // Draining them here with try_recv (never blocking) ensures the select!
         // below is only woken by keyboard, tick, or a new low-freq event ---
         // so keyboard input is never starved by a full channel.
-        loop {
-            match event_rx.try_recv() {
-                Ok(ev) => {
-                    if let AppEvent::AddShare(ref p) = ev {
-                        let raw = p.to_string_lossy().to_string();
-                        try_share_path(&raw, &shares, &event_tx);
-                    } else {
-                        app.handle_event(ev);
-                    }
-                }
-                Err(_) => break,
+        while let Ok(ev) = event_rx.try_recv() {
+            if let AppEvent::AddShare(ref p) = ev {
+                    let raw = p.to_string_lossy().to_string();
+                    try_share_path(&raw, &shares, &event_tx);
+            } else {
+                app.handle_event(ev);
             }
         }
+
 
         // --- Phase 3: render ---
         terminal.draw(|f| ui::draw(f, &app))?;
