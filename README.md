@@ -4,6 +4,8 @@
 
 A fast, zero-config local network file sharing CLI. Share files and folders with anyone on your LAN — with a live TUI showing peers, their files, and your active shares. Also accessible from any browser on the network with full upload, download, and delete support.
 
+![Overview TUI](docs/Overview.png "TUI Overview")
+
 ## Features
 
 - **Live TUI** — split screen: peers on the left, your shares on the right, transfers and activity log at the bottom
@@ -48,6 +50,10 @@ cargo build --release
 
 On first launch you'll be asked for a display name (saved to config).
 
+### WebUi
+
+![WebUi Overview](docs/WebUi.png "WebUi Overview")
+
 ### Non-interactive send
 
 ```bash
@@ -83,6 +89,7 @@ The status bar at the bottom always shows the shortcuts available in the current
 | `m` | My Shares | Enter a file/folder path manually |
 | `x` / `Delete` | My Shares | Remove share (file untouched) |
 | `r` | Any | Toggle QR code overlay for browser URL |
+| `u` | Any | Toggle download speed unit: MB/s ↔ Mb/s |
 | `?` | Any | Toggle help overlay |
 | `q` / `Ctrl+C` | Any | Quit |
 
