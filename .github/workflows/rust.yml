@@ -1,16 +1,51 @@
 name: Build Release Binaries
 
 on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
   release:
     types: [created]
 
 permissions:
   contents: write
 
+# ── Fast CI — runs on every push and PR ─────────────────────────────────────
+# Catches issues before they reach a release build.
+# Single Linux runner, debug mode — finishes in ~2 min.
 jobs:
+  ci:
+    name: Check & Lint
+    runs-on: ubuntu-latest
+    if: github.event_name != 'release'
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+
+      - name: Cache
+        uses: Swatinem/rust-cache@v2
+
+      - name: fmt
+        run: cargo fmt --check
+
+      - name: clippy
+        run: cargo clippy -- -D warnings
+
+      - name: test
+        run: cargo test
+
+# ── Release — only on GitHub Release creation ────────────────────────────────
+# Skips lint/fmt (already caught by CI above).
+# Builds all targets and uploads binaries.
   build:
     name: ${{ matrix.name }}
     runs-on: ${{ matrix.os }}
+    if: github.event_name == 'release'
 
     strategy:
       matrix:
@@ -44,6 +79,11 @@ jobs:
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
 
       - name: Add target
         run: rustup target add ${{ matrix.target }}
