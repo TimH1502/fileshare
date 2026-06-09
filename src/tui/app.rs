@@ -1,4 +1,4 @@
-use crate::client::{self, DownloadControl, DownloadResult, RemoteShareInfo, calc_eta_seconds};
+use crate::client::{self, calc_eta_seconds, DownloadControl, DownloadResult, RemoteShareInfo};
 use crate::config::Config;
 use crate::discovery::{Peer, PeerRegistry};
 use crate::server::ServerEvent;
@@ -50,7 +50,7 @@ pub struct DownloadState {
 
 #[derive(Debug, Clone)]
 pub struct UploadState {
-    pub id: String,       // share id (from ServerEvent)
+    pub id: String, // share id (from ServerEvent)
     pub name: String,
     pub bytes_sent: u64,
     pub total: u64,
@@ -58,7 +58,7 @@ pub struct UploadState {
     pub done: bool,
     pub cancelled: bool,
     pub done_at: Option<std::time::Instant>,
-    pub last_bytes: u64,  // for speed calculation
+    pub last_bytes: u64, // for speed calculation
     pub last_tick: std::time::Instant,
     pub eta_seconds: f64,
     pub smoothed_speed: f64,
@@ -81,7 +81,7 @@ pub struct WebUploadState {
     pub transfer_id: String,
     pub name: String,
     pub bytes_received: u64,
-    pub total: u64,          // 0 when Content-Length was absent
+    pub total: u64, // 0 when Content-Length was absent
     pub speed_bps: f64,
     pub smoothed_speed: f64,
     pub eta_seconds: f64,
@@ -98,10 +98,22 @@ pub enum AppEvent {
     Tick,
     PeerFilesLoaded(Vec<RemoteShareInfo>),
     /// Progress update keyed by share id
-    DownloadProgress { id: String, progress: client::DownloadProgress },
-    DownloadDone { id: String, result: DownloadResult },
-    DownloadError { id: String, error: String },
-    DownloadRetrying { id: String, attempt: u32 },
+    DownloadProgress {
+        id: String,
+        progress: client::DownloadProgress,
+    },
+    DownloadDone {
+        id: String,
+        result: DownloadResult,
+    },
+    DownloadError {
+        id: String,
+        error: String,
+    },
+    DownloadRetrying {
+        id: String,
+        attempt: u32,
+    },
     ServerEvent(ServerEvent),
     AddShare(PathBuf),
     ZipConfirmNeeded(ZipConfirmRequest),
@@ -109,27 +121,31 @@ pub enum AppEvent {
     ShareAdded(crate::shares::SharedItem),
     ShareError(String),
     /// Live progress tick while zipping: folder name, files done, total files
-    ZipProgress { folder: String, done: usize, total: usize },
+    ZipProgress {
+        folder: String,
+        done: usize,
+        total: usize,
+    },
 }
 
 /// Whether transfer speeds are displayed in bytes/s (MB/s) or bits/s (Mb/s)
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SpeedUnit {
-    Bytes,  // MB/s, KB/s
-    Bits,   // Mb/s, Kb/s
+    Bytes, // MB/s, KB/s
+    Bits,  // Mb/s, Kb/s
 }
 
 impl SpeedUnit {
     pub fn toggle(self) -> Self {
         match self {
             SpeedUnit::Bytes => SpeedUnit::Bits,
-            SpeedUnit::Bits  => SpeedUnit::Bytes,
+            SpeedUnit::Bits => SpeedUnit::Bytes,
         }
     }
     pub fn label(self) -> &'static str {
         match self {
             SpeedUnit::Bytes => "MB/s",
-            SpeedUnit::Bits  => "Mb/s",
+            SpeedUnit::Bits => "Mb/s",
         }
     }
 }
@@ -138,19 +154,19 @@ impl SpeedUnit {
 /// swapped at runtime without touching any rendering logic.
 #[derive(Debug, Clone)]
 pub struct Theme {
-    pub name:        &'static str,
-    pub accent:      ratatui::style::Color,   // borders, titles, highlights
-    pub dim:         ratatui::style::Color,   // secondary text, inactive elements
-    pub success:     ratatui::style::Color,   // done / live / checkmark
-    pub warn:        ratatui::style::Color,   // warnings, expiry, retrying
-    pub error:       ratatui::style::Color,   // cancelled, failed
-    pub download:    ratatui::style::Color,   // download progress bars / icons
-    pub upload:      ratatui::style::Color,   // upload progress (peer-to-peer)
-    pub web_upload:  ratatui::style::Color,   // upload from browser
-    pub selected_bg: ratatui::style::Color,   // selected row background
-    pub bar_bg:      ratatui::style::Color,   // title bar + status bar background
-    pub overlay_bg:  ratatui::style::Color,   // popup / overlay background
-    pub text:        ratatui::style::Color,   // primary text
+    pub name: &'static str,
+    pub accent: ratatui::style::Color, // borders, titles, highlights
+    pub dim: ratatui::style::Color,    // secondary text, inactive elements
+    pub success: ratatui::style::Color, // done / live / checkmark
+    pub warn: ratatui::style::Color,   // warnings, expiry, retrying
+    pub error: ratatui::style::Color,  // cancelled, failed
+    pub download: ratatui::style::Color, // download progress bars / icons
+    pub upload: ratatui::style::Color, // upload progress (peer-to-peer)
+    pub web_upload: ratatui::style::Color, // upload from browser
+    pub selected_bg: ratatui::style::Color, // selected row background
+    pub bar_bg: ratatui::style::Color, // title bar + status bar background
+    pub overlay_bg: ratatui::style::Color, // popup / overlay background
+    pub text: ratatui::style::Color,   // primary text
 }
 
 use ratatui::style::Color;
@@ -158,83 +174,83 @@ use ratatui::style::Color;
 pub const THEMES: &[Theme] = &[
     // ── Ocean (default) ─────────────────────────────────────────────────────
     Theme {
-        name:        "Ocean",
-        accent:      Color::Cyan,
-        dim:         Color::DarkGray,
-        success:     Color::Green,
-        warn:        Color::Yellow,
-        error:       Color::Red,
-        download:    Color::Magenta,
-        upload:      Color::Rgb(255, 165, 0),
-        web_upload:  Color::Rgb(100, 200, 255),
+        name: "Ocean",
+        accent: Color::Cyan,
+        dim: Color::DarkGray,
+        success: Color::Green,
+        warn: Color::Yellow,
+        error: Color::Red,
+        download: Color::Magenta,
+        upload: Color::Rgb(255, 165, 0),
+        web_upload: Color::Rgb(100, 200, 255),
         selected_bg: Color::Rgb(30, 50, 60),
-        bar_bg:      Color::Rgb(15, 20, 30),
-        overlay_bg:  Color::Rgb(10, 15, 25),
-        text:        Color::White,
+        bar_bg: Color::Rgb(15, 20, 30),
+        overlay_bg: Color::Rgb(10, 15, 25),
+        text: Color::White,
     },
     // ── Dracula ─────────────────────────────────────────────────────────────
     Theme {
-        name:        "Dracula",
-        accent:      Color::Rgb(189, 147, 249), // purple
-        dim:         Color::Rgb(98, 114, 164),
-        success:     Color::Rgb(80, 250, 123),  // green
-        warn:        Color::Rgb(255, 184, 108), // orange
-        error:       Color::Rgb(255, 85, 85),   // red
-        download:    Color::Rgb(255, 121, 198), // pink
-        upload:      Color::Rgb(255, 184, 108), // orange
-        web_upload:  Color::Rgb(139, 233, 253), // cyan
+        name: "Dracula",
+        accent: Color::Rgb(189, 147, 249), // purple
+        dim: Color::Rgb(98, 114, 164),
+        success: Color::Rgb(80, 250, 123),     // green
+        warn: Color::Rgb(255, 184, 108),       // orange
+        error: Color::Rgb(255, 85, 85),        // red
+        download: Color::Rgb(255, 121, 198),   // pink
+        upload: Color::Rgb(255, 184, 108),     // orange
+        web_upload: Color::Rgb(139, 233, 253), // cyan
         selected_bg: Color::Rgb(68, 71, 90),
-        bar_bg:      Color::Rgb(33, 34, 44),
-        overlay_bg:  Color::Rgb(22, 22, 30),
-        text:        Color::Rgb(248, 248, 242),
+        bar_bg: Color::Rgb(33, 34, 44),
+        overlay_bg: Color::Rgb(22, 22, 30),
+        text: Color::Rgb(248, 248, 242),
     },
     // ── Nord ────────────────────────────────────────────────────────────────
     Theme {
-        name:        "Nord",
-        accent:      Color::Rgb(136, 192, 208), // frost blue
-        dim:         Color::Rgb(76, 86, 106),
-        success:     Color::Rgb(163, 190, 140), // aurora green
-        warn:        Color::Rgb(235, 203, 139), // aurora yellow
-        error:       Color::Rgb(191, 97, 106),  // aurora red
-        download:    Color::Rgb(180, 142, 173), // aurora purple
-        upload:      Color::Rgb(208, 135, 112), // aurora orange
-        web_upload:  Color::Rgb(143, 188, 187), // teal frost
+        name: "Nord",
+        accent: Color::Rgb(136, 192, 208), // frost blue
+        dim: Color::Rgb(76, 86, 106),
+        success: Color::Rgb(163, 190, 140),    // aurora green
+        warn: Color::Rgb(235, 203, 139),       // aurora yellow
+        error: Color::Rgb(191, 97, 106),       // aurora red
+        download: Color::Rgb(180, 142, 173),   // aurora purple
+        upload: Color::Rgb(208, 135, 112),     // aurora orange
+        web_upload: Color::Rgb(143, 188, 187), // teal frost
         selected_bg: Color::Rgb(59, 66, 82),
-        bar_bg:      Color::Rgb(36, 41, 51),
-        overlay_bg:  Color::Rgb(29, 33, 42),
-        text:        Color::Rgb(229, 233, 240),
+        bar_bg: Color::Rgb(36, 41, 51),
+        overlay_bg: Color::Rgb(29, 33, 42),
+        text: Color::Rgb(229, 233, 240),
     },
     // ── Gruvbox ─────────────────────────────────────────────────────────────
     Theme {
-        name:        "Gruvbox",
-        accent:      Color::Rgb(214, 152, 33),  // bright yellow
-        dim:         Color::Rgb(146, 131, 116),
-        success:     Color::Rgb(152, 151, 26),  // olive green
-        warn:        Color::Rgb(215, 153, 33),  // orange
-        error:       Color::Rgb(204, 36, 29),   // red
-        download:    Color::Rgb(177, 98, 134),  // purple
-        upload:      Color::Rgb(214, 93, 14),   // bright orange
-        web_upload:  Color::Rgb(104, 157, 106), // aqua
+        name: "Gruvbox",
+        accent: Color::Rgb(214, 152, 33), // bright yellow
+        dim: Color::Rgb(146, 131, 116),
+        success: Color::Rgb(152, 151, 26),     // olive green
+        warn: Color::Rgb(215, 153, 33),        // orange
+        error: Color::Rgb(204, 36, 29),        // red
+        download: Color::Rgb(177, 98, 134),    // purple
+        upload: Color::Rgb(214, 93, 14),       // bright orange
+        web_upload: Color::Rgb(104, 157, 106), // aqua
         selected_bg: Color::Rgb(80, 73, 69),
-        bar_bg:      Color::Rgb(40, 36, 32),
-        overlay_bg:  Color::Rgb(29, 26, 24),
-        text:        Color::Rgb(235, 219, 178),
+        bar_bg: Color::Rgb(40, 36, 32),
+        overlay_bg: Color::Rgb(29, 26, 24),
+        text: Color::Rgb(235, 219, 178),
     },
     // ── Matrix ──────────────────────────────────────────────────────────────
     Theme {
-        name:        "Matrix",
-        accent:      Color::Rgb(0, 255, 70),    // bright green
-        dim:         Color::Rgb(0, 100, 30),
-        success:     Color::Rgb(0, 255, 70),
-        warn:        Color::Rgb(180, 255, 0),
-        error:       Color::Rgb(255, 50, 50),
-        download:    Color::Rgb(0, 200, 100),
-        upload:      Color::Rgb(100, 255, 150),
-        web_upload:  Color::Rgb(0, 220, 180),
+        name: "Matrix",
+        accent: Color::Rgb(0, 255, 70), // bright green
+        dim: Color::Rgb(0, 100, 30),
+        success: Color::Rgb(0, 255, 70),
+        warn: Color::Rgb(180, 255, 0),
+        error: Color::Rgb(255, 50, 50),
+        download: Color::Rgb(0, 200, 100),
+        upload: Color::Rgb(100, 255, 150),
+        web_upload: Color::Rgb(0, 220, 180),
         selected_bg: Color::Rgb(0, 40, 15),
-        bar_bg:      Color::Rgb(0, 15, 5),
-        overlay_bg:  Color::Rgb(0, 8, 3),
-        text:        Color::Rgb(180, 255, 200),
+        bar_bg: Color::Rgb(0, 15, 5),
+        overlay_bg: Color::Rgb(0, 8, 3),
+        text: Color::Rgb(180, 255, 200),
     },
 ];
 
@@ -393,7 +409,9 @@ impl App {
         if let Some(ref mut input) = self.manual_path_input {
             match key.code {
                 KeyCode::Char(c) => input.push(c),
-                KeyCode::Backspace => { input.pop(); }
+                KeyCode::Backspace => {
+                    input.pop();
+                }
                 KeyCode::Enter => {
                     let path_str = input.clone();
                     self.manual_path_input = None;
@@ -416,7 +434,9 @@ impl App {
         if let Some(ref mut input) = self.manual_ip_input {
             match key.code {
                 KeyCode::Char(c) => input.push(c),
-                KeyCode::Backspace => { input.pop(); }
+                KeyCode::Backspace => {
+                    input.pop();
+                }
                 KeyCode::Enter => {
                     let addr_str = input.clone();
                     self.manual_ip_input = None;
@@ -559,7 +579,10 @@ impl App {
                         if self.my_shares_state > 0 {
                             self.my_shares_state -= 1;
                         }
-                        self.log(format!("Removed '{}' from shares", removed.name), LogKind::Info);
+                        self.log(
+                            format!("Removed '{}' from shares", removed.name),
+                            LogKind::Info,
+                        );
                     }
                 }
             }
@@ -592,7 +615,9 @@ impl App {
     fn handle_transfers_key(&mut self, key: crossterm::event::KeyEvent) {
         use crossterm::event::KeyCode;
         let dl_count = self.active_downloads.len();
-        if dl_count == 0 { return; }
+        if dl_count == 0 {
+            return;
+        }
         match key.code {
             KeyCode::Up | KeyCode::Char('k') => {
                 if self.transfer_cursor > 0 {
@@ -608,7 +633,9 @@ impl App {
                 // Clamp cursor in case transfers finished
                 self.transfer_cursor = self.transfer_cursor.min(dl_count.saturating_sub(1));
                 if let Some(dl) = self.active_downloads.get_mut(self.transfer_cursor) {
-                    if dl.done || dl.cancelled { return; }
+                    if dl.done || dl.cancelled {
+                        return;
+                    }
                     let new_paused = !dl.paused;
                     dl.paused = new_paused;
                     if !new_paused {
@@ -616,13 +643,23 @@ impl App {
                         dl.last_activity = std::time::Instant::now();
                     }
                     if let Some(tx) = &dl.pause_tx {
-                        let _ = tx.send(if new_paused { DownloadControl::Paused } else { DownloadControl::Running });
+                        let _ = tx.send(if new_paused {
+                            DownloadControl::Paused
+                        } else {
+                            DownloadControl::Running
+                        });
                     }
                     let name = dl.name.clone();
                     self.log(
-                        format!("{} '{}'",
-                            if new_paused { "⏸ Paused" } else { "▶ Resumed" },
-                            name),
+                        format!(
+                            "{} '{}'",
+                            if new_paused {
+                                "⏸ Paused"
+                            } else {
+                                "▶ Resumed"
+                            },
+                            name
+                        ),
                         LogKind::Info,
                     );
                 }
@@ -630,7 +667,9 @@ impl App {
             KeyCode::Char('c') | KeyCode::Delete => {
                 self.transfer_cursor = self.transfer_cursor.min(dl_count.saturating_sub(1));
                 if let Some(dl) = self.active_downloads.get_mut(self.transfer_cursor) {
-                    if dl.done || dl.cancelled { return; }
+                    if dl.done || dl.cancelled {
+                        return;
+                    }
                     // Signal cancelled, then drop sender
                     if let Some(tx) = &dl.pause_tx {
                         let _ = tx.send(DownloadControl::Cancelled);
@@ -639,10 +678,7 @@ impl App {
                     dl.cancelled = true;
                     dl.done_at = Some(std::time::Instant::now());
                     let name = dl.name.clone();
-                    self.log(
-                        format!("✖ Cancelled '{}'", name),
-                        LogKind::Warning,
-                    );
+                    self.log(format!("✖ Cancelled '{}'", name), LogKind::Warning);
                 }
             }
             _ => {}
@@ -660,7 +696,11 @@ impl App {
         };
 
         // Check if this file is already downloading
-        if self.active_downloads.iter().any(|d| d.id == file.id && !d.done) {
+        if self
+            .active_downloads
+            .iter()
+            .any(|d| d.id == file.id && !d.done)
+        {
             self.log(
                 format!("'{}' is already downloading", file.name),
                 LogKind::Warning,
@@ -724,10 +764,20 @@ impl App {
                 }
             });
 
-            match client::download_file(&base_url, &file.id, &file.name, &download_dir, prog_tx, retry_tx, pause_rx)
-                .await
+            match client::download_file(
+                &base_url,
+                &file.id,
+                &file.name,
+                &download_dir,
+                prog_tx,
+                retry_tx,
+                pause_rx,
+            )
+            .await
             {
-                Ok(result) if result.cancelled => { let _ = result; }
+                Ok(result) if result.cancelled => {
+                    let _ = result;
+                }
                 Ok(result) => {
                     tx.send(AppEvent::DownloadDone {
                         id: file_id,
@@ -777,9 +827,16 @@ impl App {
                 let msg = if let Some(dl) = self.active_downloads.iter_mut().find(|w| w.id == id) {
                     dl.retrying = true;
                     dl.last_activity = std::time::Instant::now();
-                    Some(format!("Connection lost, retrying '{}' (attempt {}/{})...", dl.name, attempt, 5))
-                } else { None };
-                if let Some(m) = msg { self.log(m, LogKind::Warning); }
+                    Some(format!(
+                        "Connection lost, retrying '{}' (attempt {}/{})...",
+                        dl.name, attempt, 5
+                    ))
+                } else {
+                    None
+                };
+                if let Some(m) = msg {
+                    self.log(m, LogKind::Warning);
+                }
             }
             AppEvent::DownloadProgress { id, progress } => {
                 if let Some(dl) = self.active_downloads.iter_mut().find(|d| d.id == id) {
@@ -793,13 +850,17 @@ impl App {
             }
             AppEvent::DownloadDone { id, result } => {
                 if let Some(dl) = self.active_downloads.iter_mut().find(|d| d.id == id) {
-                    if dl.cancelled { return; }
+                    if dl.cancelled {
+                        return;
+                    }
                     dl.done = true;
                     dl.pause_tx = None;
                     dl.done_at = Some(std::time::Instant::now());
                     // For very small/fast files total may still be 0 if no progress
                     // events fired. Ensure the bar renders as 100% either way.
-                    if dl.total == 0 { dl.total = 1; }
+                    if dl.total == 0 {
+                        dl.total = 1;
+                    }
                     dl.bytes_done = dl.total; // show 100%
                     let name = dl.name.clone();
                     let checksum_note = match result.checksum_ok {
@@ -845,13 +906,21 @@ impl App {
                     LogKind::Success,
                 );
                 // Mark the matching upload as done (may already be pruned if tiny file)
-                if let Some(ul) = self.active_uploads.iter_mut().find(|u| u.name == item_name && !u.done) {
+                if let Some(ul) = self
+                    .active_uploads
+                    .iter_mut()
+                    .find(|u| u.name == item_name && !u.done)
+                {
                     ul.done = true;
                     ul.done_at = Some(std::time::Instant::now());
                     ul.bytes_sent = ul.total;
                 }
             }
-            AppEvent::ServerEvent(ServerEvent::UploadProgress { item_id, bytes_sent, total }) => {
+            AppEvent::ServerEvent(ServerEvent::UploadProgress {
+                item_id,
+                bytes_sent,
+                total,
+            }) => {
                 let now = std::time::Instant::now();
                 if let Some(ul) = self.active_uploads.iter_mut().find(|u| u.id == item_id) {
                     // Always update position and accumulate into smoothed speed
@@ -865,7 +934,13 @@ impl App {
 
                     // Heavy EMA -- alpha 0.05 keeps a ~20-sample rolling average
                     let alpha = 0.05;
-                    let (new_eta, new_smooth) = calc_eta_seconds(ul.smoothed_speed, instant_speed, alpha, ul.total, ul.bytes_sent);
+                    let (new_eta, new_smooth) = calc_eta_seconds(
+                        ul.smoothed_speed,
+                        instant_speed,
+                        alpha,
+                        ul.total,
+                        ul.bytes_sent,
+                    );
                     ul.smoothed_speed = new_smooth;
 
                     // Only push to display fields every 500 ms to prevent flickering
@@ -881,7 +956,9 @@ impl App {
                         ul.done_at = Some(now);
                     }
                 } else {
-                    let name = self.shares.get(&item_id)
+                    let name = self
+                        .shares
+                        .get(&item_id)
                         .map(|s| s.name.clone())
                         .unwrap_or_else(|| item_id.clone());
                     self.active_uploads.push(UploadState {
@@ -892,7 +969,11 @@ impl App {
                         speed_bps: 0.0,
                         done: total > 0 && bytes_sent >= total,
                         cancelled: false,
-                        done_at: if total > 0 && bytes_sent >= total { Some(now) } else { None },
+                        done_at: if total > 0 && bytes_sent >= total {
+                            Some(now)
+                        } else {
+                            None
+                        },
                         last_bytes: bytes_sent,
                         last_tick: now,
                         eta_seconds: 0.0,
@@ -940,7 +1021,11 @@ impl App {
                             let folder = folder_name.to_string();
                             let etx2 = etx2.clone();
                             // Use try_send to avoid blocking the zip thread
-                            let _ = etx2.try_send(AppEvent::ZipProgress { folder, done, total });
+                            let _ = etx2.try_send(AppEvent::ZipProgress {
+                                folder,
+                                done,
+                                total,
+                            });
                         },
                     ) {
                         Ok(item) => {
@@ -952,16 +1037,16 @@ impl App {
                     }
                 });
             }
-            AppEvent::ZipProgress { folder, done, total } => {
+            AppEvent::ZipProgress {
+                folder,
+                done,
+                total,
+            } => {
                 let pct = (done * 100).checked_div(total).unwrap_or(0);
                 // Build a compact progress bar: [████░░░░] 42/76 (55%)
                 const BAR_W: usize = 20;
                 let filled = (BAR_W * done).checked_div(total).unwrap_or(0);
-                let bar = format!(
-                    "[{}{}]",
-                    "█".repeat(filled),
-                    "░".repeat(BAR_W - filled),
-                );
+                let bar = format!("[{}{}]", "█".repeat(filled), "░".repeat(BAR_W - filled),);
                 let msg = format!(
                     "📦 Zipping '{}' {} {}/{} files ({}%)",
                     folder, bar, done, total, pct
@@ -984,7 +1069,12 @@ impl App {
                 self.log(format!("✗ Share failed: {}", e), LogKind::Warning);
             }
 
-            AppEvent::ServerEvent(ServerEvent::WebUploadStarted { transfer_id, filename, total, by_addr }) => {
+            AppEvent::ServerEvent(ServerEvent::WebUploadStarted {
+                transfer_id,
+                filename,
+                total,
+                by_addr,
+            }) => {
                 let now = std::time::Instant::now();
                 self.log(
                     format!("\u{2b06} '{}' upload started from {}", filename, by_addr),
@@ -1007,20 +1097,36 @@ impl App {
                     by_addr,
                 });
             }
-            AppEvent::ServerEvent(ServerEvent::WebUploadProgress { transfer_id, bytes_received, total }) => {
+            AppEvent::ServerEvent(ServerEvent::WebUploadProgress {
+                transfer_id,
+                bytes_received,
+                total,
+            }) => {
                 let now = std::time::Instant::now();
-                if let Some(wu) = self.web_uploads.iter_mut().find(|w| w.transfer_id == transfer_id) {
+                if let Some(wu) = self
+                    .web_uploads
+                    .iter_mut()
+                    .find(|w| w.transfer_id == transfer_id)
+                {
                     let elapsed = now.duration_since(wu.last_tick).as_secs_f64().max(0.001);
                     let delta = bytes_received.saturating_sub(wu.last_bytes) as f64;
                     let instant_speed = delta / elapsed;
                     wu.last_bytes = bytes_received;
                     wu.last_tick = now;
                     wu.bytes_received = bytes_received;
-                    if total > 0 { wu.total = total; }
+                    if total > 0 {
+                        wu.total = total;
+                    }
 
                     // Heavy EMA -- alpha 0.05 keeps a ~20-sample rolling average
                     let alpha = 0.05;
-                    let (new_eta, new_smooth) = calc_eta_seconds(wu.smoothed_speed, instant_speed, alpha, wu.total, wu.bytes_received);
+                    let (new_eta, new_smooth) = calc_eta_seconds(
+                        wu.smoothed_speed,
+                        instant_speed,
+                        alpha,
+                        wu.total,
+                        wu.bytes_received,
+                    );
                     wu.smoothed_speed = new_smooth;
 
                     // Only push to display fields every 500 ms to prevent flickering
@@ -1031,22 +1137,46 @@ impl App {
                     }
                 }
             }
-            AppEvent::ServerEvent(ServerEvent::WebUploadFinished { transfer_id}) => {
-                let msg = if let Some(wu) = self.web_uploads.iter_mut().find(|w| w.transfer_id == transfer_id) {
+            AppEvent::ServerEvent(ServerEvent::WebUploadFinished { transfer_id }) => {
+                let msg = if let Some(wu) = self
+                    .web_uploads
+                    .iter_mut()
+                    .find(|w| w.transfer_id == transfer_id)
+                {
                     wu.done = true;
                     wu.done_at = Some(std::time::Instant::now());
-                    if wu.total > 0 { wu.bytes_received = wu.total; }
-                    Some(format!("\u{2714} '{}' received from {} via web UI", wu.name, wu.by_addr))
-                } else { None };
-                if let Some(m) = msg { self.log(m, LogKind::Success); }
+                    if wu.total > 0 {
+                        wu.bytes_received = wu.total;
+                    }
+                    Some(format!(
+                        "\u{2714} '{}' received from {} via web UI",
+                        wu.name, wu.by_addr
+                    ))
+                } else {
+                    None
+                };
+                if let Some(m) = msg {
+                    self.log(m, LogKind::Success);
+                }
             }
             AppEvent::ServerEvent(ServerEvent::WebUploadFailed { transfer_id }) => {
-                let msg = if let Some(wu) = self.web_uploads.iter_mut().find(|w| w.transfer_id == transfer_id) {
+                let msg = if let Some(wu) = self
+                    .web_uploads
+                    .iter_mut()
+                    .find(|w| w.transfer_id == transfer_id)
+                {
                     wu.failed = true;
                     wu.done_at = Some(std::time::Instant::now());
-                    Some(format!("\u{2717} '{}' upload from {} failed", wu.name, wu.by_addr))
-                } else { None };
-                if let Some(m) = msg { self.log(m, LogKind::Warning); }
+                    Some(format!(
+                        "\u{2717} '{}' upload from {} failed",
+                        wu.name, wu.by_addr
+                    ))
+                } else {
+                    None
+                };
+                if let Some(m) = msg {
+                    self.log(m, LogKind::Warning);
+                }
             }
             AppEvent::Tick => {
                 // Auto-refresh peer files every 3 seconds
@@ -1055,10 +1185,12 @@ impl App {
                     let interval = std::time::Duration::from_secs(3);
 
                     if now.duration_since(self.last_peer_refresh) >= interval
-                        && !self.peer_files_loading && self.selected_peer().is_some() {
-                            self.load_peer_files();
-                            self.last_peer_refresh = now;
-                        }
+                        && !self.peer_files_loading
+                        && self.selected_peer().is_some()
+                    {
+                        self.load_peer_files();
+                        self.last_peer_refresh = now;
+                    }
                 }
 
                 // Mark stale (cancelled/dropped) transfers as done so they get pruned.
@@ -1067,7 +1199,11 @@ impl App {
                 const STALE_SECS: u64 = 10;
                 let now = std::time::Instant::now();
                 for dl in self.active_downloads.iter_mut() {
-                    if !dl.done && !dl.cancelled && !dl.paused && dl.last_activity.elapsed().as_secs() >= STALE_SECS {
+                    if !dl.done
+                        && !dl.cancelled
+                        && !dl.paused
+                        && dl.last_activity.elapsed().as_secs() >= STALE_SECS
+                    {
                         dl.cancelled = true;
                         dl.pause_tx = None;
                         dl.done_at = Some(now);
@@ -1091,19 +1227,17 @@ impl App {
                     }
                 }
                 // Prune finished/failed transfers after 3 seconds visible
-                self.active_downloads.retain(|d| {
-                    d.done_at.map(|t| t.elapsed().as_secs() < 3).unwrap_or(true)
-                });
+                self.active_downloads
+                    .retain(|d| d.done_at.map(|t| t.elapsed().as_secs() < 3).unwrap_or(true));
                 // Keep cursor in bounds after pruning
                 if !self.active_downloads.is_empty() {
-                    self.transfer_cursor = self.transfer_cursor.min(self.active_downloads.len() - 1);
+                    self.transfer_cursor =
+                        self.transfer_cursor.min(self.active_downloads.len() - 1);
                 }
-                self.active_uploads.retain(|u| {
-                    u.done_at.map(|t| t.elapsed().as_secs() < 3).unwrap_or(true)
-                });
-                self.web_uploads.retain(|w| {
-                    w.done_at.map(|t| t.elapsed().as_secs() < 3).unwrap_or(true)
-                });
+                self.active_uploads
+                    .retain(|u| u.done_at.map(|t| t.elapsed().as_secs() < 3).unwrap_or(true));
+                self.web_uploads
+                    .retain(|w| w.done_at.map(|t| t.elapsed().as_secs() < 3).unwrap_or(true));
             }
             _ => {}
         }
@@ -1178,7 +1312,10 @@ mod tests {
         app.handle_event(AppEvent::Tick);
 
         let dl = &app.active_downloads[0];
-        assert!(!dl.cancelled, "paused download must never be stale-cancelled");
+        assert!(
+            !dl.cancelled,
+            "paused download must never be stale-cancelled"
+        );
     }
 
     #[test]
@@ -1189,13 +1326,16 @@ mod tests {
         dl.done_at = Some(
             std::time::Instant::now()
                 .checked_sub(std::time::Duration::from_secs(4))
-                .unwrap()
+                .unwrap(),
         );
         app.active_downloads.push(dl);
 
         app.handle_event(AppEvent::Tick);
 
-        assert!(app.active_downloads.is_empty(), "finished download should be pruned after 3s");
+        assert!(
+            app.active_downloads.is_empty(),
+            "finished download should be pruned after 3s"
+        );
     }
 
     #[test]
@@ -1208,7 +1348,10 @@ mod tests {
 
         app.handle_event(AppEvent::Tick);
 
-        assert!(!app.active_downloads.is_empty(), "recently finished download should still be visible");
+        assert!(
+            !app.active_downloads.is_empty(),
+            "recently finished download should still be visible"
+        );
     }
 
     // -----------------------------------------------------------------------
@@ -1225,10 +1368,16 @@ mod tests {
         let key = crossterm::event::KeyEvent::from(crossterm::event::KeyCode::Char('p'));
         app.handle_key(key);
 
-        assert!(app.active_downloads[0].paused, "download should be paused after p");
+        assert!(
+            app.active_downloads[0].paused,
+            "download should be paused after p"
+        );
 
         app.handle_key(key);
-        assert!(!app.active_downloads[0].paused, "download should resume after second p");
+        assert!(
+            !app.active_downloads[0].paused,
+            "download should resume after second p"
+        );
     }
 
     #[test]
@@ -1244,7 +1393,10 @@ mod tests {
         let dl = &app.active_downloads[0];
         assert!(dl.cancelled, "download should be cancelled");
         assert!(dl.done_at.is_some(), "done_at should be set on cancel");
-        assert!(dl.pause_tx.is_none(), "pause_tx should be dropped on cancel");
+        assert!(
+            dl.pause_tx.is_none(),
+            "pause_tx should be dropped on cancel"
+        );
     }
 
     #[test]

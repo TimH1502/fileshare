@@ -5,11 +5,11 @@ use axum::{
     routing::{delete, get, post},
     Router,
 };
-use tokio::io::{AsyncSeekExt};
-use std::io::SeekFrom;
 use nanoid::nanoid;
 use serde::Serialize;
+use std::io::SeekFrom;
 use std::sync::Arc;
+use tokio::io::AsyncSeekExt;
 use tokio::sync::broadcast;
 
 use crate::shares::{ShareKind, ShareRegistry, SharedItem};
@@ -24,19 +24,46 @@ pub struct AppState {
 
 #[derive(Debug, Clone)]
 pub enum ServerEvent {
-    Downloaded { item_name: String, by_addr: String },
-    Uploaded { item_name: String, by_addr: String },
-    UploadProgress { item_id: String, bytes_sent: u64, total: u64 },
-    UploadDone { item_id: String },
-    Deleted { item_name: String },
+    Downloaded {
+        item_name: String,
+        by_addr: String,
+    },
+    Uploaded {
+        item_name: String,
+        by_addr: String,
+    },
+    UploadProgress {
+        item_id: String,
+        bytes_sent: u64,
+        total: u64,
+    },
+    UploadDone {
+        item_id: String,
+    },
+    Deleted {
+        item_name: String,
+    },
     /// A browser/web-UI upload has just started streaming in.
-    WebUploadStarted { transfer_id: String, filename: String, total: u64, by_addr: String },
+    WebUploadStarted {
+        transfer_id: String,
+        filename: String,
+        total: u64,
+        by_addr: String,
+    },
     /// Periodic progress while the web-UI upload is streaming in.
-    WebUploadProgress { transfer_id: String, bytes_received: u64, total: u64 },
+    WebUploadProgress {
+        transfer_id: String,
+        bytes_received: u64,
+        total: u64,
+    },
     /// The web-UI upload finished (file written, share registered).
-    WebUploadFinished { transfer_id: String },
+    WebUploadFinished {
+        transfer_id: String,
+    },
     /// The web-UI upload failed mid-stream.
-    WebUploadFailed { transfer_id: String },
+    WebUploadFailed {
+        transfer_id: String,
+    },
 }
 
 #[derive(Serialize)]
@@ -177,8 +204,7 @@ async fn download_file(
         let checksum = item.checksum.clone();
 
         let zip_result = tokio::task::spawn_blocking(move || {
-            let tmp = std::env::temp_dir()
-                .join(format!("fileshare_tmp_{}.zip", folder_name));
+            let tmp = std::env::temp_dir().join(format!("fileshare_tmp_{}.zip", folder_name));
             crate::shares::zip_folder_pub(&folder_path, &tmp)?;
             Ok::<_, anyhow::Error>(tmp)
         })
@@ -187,7 +213,10 @@ async fn download_file(
         return match zip_result {
             Ok(Ok(tmp_path)) => match tokio::fs::File::open(&tmp_path).await {
                 Ok(file) => {
-                    let size = tokio::fs::metadata(&tmp_path).await.map(|m| m.len()).unwrap_or(0);
+                    let size = tokio::fs::metadata(&tmp_path)
+                        .await
+                        .map(|m| m.len())
+                        .unwrap_or(0);
                     let progress_stream = ProgressStream {
                         inner: tokio_util::io::ReaderStream::new(file),
                         event_tx: state.event_tx.clone(),
@@ -201,15 +230,19 @@ async fn download_file(
                     Response::builder()
                         .status(StatusCode::OK)
                         .header(header::CONTENT_TYPE, "application/zip")
-                        .header(header::CONTENT_DISPOSITION,
-                            format!("attachment; filename=\"{}.zip\"", item.name))
+                        .header(
+                            header::CONTENT_DISPOSITION,
+                            format!("attachment; filename=\"{}.zip\"", item.name),
+                        )
                         .header(header::CONTENT_LENGTH, size)
                         .header(header::ACCEPT_RANGES, "none")
                         .header("X-Checksum-SHA256", &checksum)
                         .body(body)
                         .unwrap()
                 }
-                Err(_) => (StatusCode::INTERNAL_SERVER_ERROR, "Failed to open temp zip").into_response(),
+                Err(_) => {
+                    (StatusCode::INTERNAL_SERVER_ERROR, "Failed to open temp zip").into_response()
+                }
             },
             _ => (StatusCode::INTERNAL_SERVER_ERROR, "Failed to zip folder").into_response(),
         };
@@ -221,8 +254,12 @@ async fn download_file(
             let (content_type, filename) = if matches!(item.kind, ShareKind::ZippedFolder) {
                 ("application/zip".to_string(), format!("{}.zip", item.name))
             } else {
-                (mime_guess::from_path(&item.path).first_or_octet_stream().to_string(),
-                 item.name.clone())
+                (
+                    mime_guess::from_path(&item.path)
+                        .first_or_octet_stream()
+                        .to_string(),
+                    item.name.clone(),
+                )
             };
 
             // Honour Range requests so browser pause/resume works
@@ -247,7 +284,7 @@ async fn download_file(
                 inner: tokio_util::io::ReaderStream::new(file),
                 event_tx: state.event_tx.clone(),
                 item_id: item.id.clone(),
-                bytes_sent: start,   // progress already accounts for resumed offset
+                bytes_sent: start, // progress already accounts for resumed offset
                 total,
                 last_report: start,
             };
@@ -256,8 +293,10 @@ async fn download_file(
             let mut builder = Response::builder()
                 .status(status)
                 .header(header::CONTENT_TYPE, content_type)
-                .header(header::CONTENT_DISPOSITION,
-                    format!("attachment; filename=\"{}\"", filename))
+                .header(
+                    header::CONTENT_DISPOSITION,
+                    format!("attachment; filename=\"{}\"", filename),
+                )
                 .header(header::CONTENT_LENGTH, content_length)
                 .header(header::ACCEPT_RANGES, "bytes")
                 .header("X-Checksum-SHA256", &item.checksum);
@@ -267,8 +306,7 @@ async fn download_file(
                     format!("bytes {}-{}/{}", start, total - 1, total),
                 );
             }
-            builder.body(body)
-                .unwrap()
+            builder.body(body).unwrap()
         }
         Err(_) => (StatusCode::INTERNAL_SERVER_ERROR, "Failed to open file").into_response(),
     }
@@ -308,12 +346,15 @@ async fn upload_file(
         let transfer_id = nanoid!(8);
 
         // Notify TUI that an upload is starting
-        state.event_tx.send(ServerEvent::WebUploadStarted {
-            transfer_id: transfer_id.clone(),
-            filename: filename.clone(),
-            total: content_length,
-            by_addr: addr.ip().to_string(),
-        }).ok();
+        state
+            .event_tx
+            .send(ServerEvent::WebUploadStarted {
+                transfer_id: transfer_id.clone(),
+                filename: filename.clone(),
+                total: content_length,
+                by_addr: addr.ip().to_string(),
+            })
+            .ok();
 
         // Stream to a temp file first, then move it into the download dir
         let tmp_path = state.download_dir.join(format!(".upload_tmp_{}", filename));
@@ -321,7 +362,10 @@ async fn upload_file(
 
         // Ensure download dir exists
         if let Err(e) = tokio::fs::create_dir_all(&state.download_dir).await {
-            state.event_tx.send(ServerEvent::WebUploadFailed { transfer_id }).ok();
+            state
+                .event_tx
+                .send(ServerEvent::WebUploadFailed { transfer_id })
+                .ok();
             return Json(UploadResponse {
                 ok: false,
                 name: filename,
@@ -336,7 +380,10 @@ async fn upload_file(
         let mut f = match tokio::fs::File::create(&tmp_path).await {
             Ok(f) => f,
             Err(e) => {
-                state.event_tx.send(ServerEvent::WebUploadFailed { transfer_id }).ok();
+                state
+                    .event_tx
+                    .send(ServerEvent::WebUploadFailed { transfer_id })
+                    .ok();
                 return Json(UploadResponse {
                     ok: false,
                     name: filename,
@@ -344,7 +391,7 @@ async fn upload_file(
                     size_human: String::new(),
                     error: Some(format!("Failed to create temp file: {e}")),
                 })
-                .into_response()
+                .into_response();
             }
         };
 
@@ -358,7 +405,10 @@ async fn upload_file(
                     bytes_received += chunk.len() as u64;
                     if let Err(e) = f.write_all(&chunk).await {
                         tokio::fs::remove_file(&tmp_path).await.ok();
-                        state.event_tx.send(ServerEvent::WebUploadFailed { transfer_id }).ok();
+                        state
+                            .event_tx
+                            .send(ServerEvent::WebUploadFailed { transfer_id })
+                            .ok();
                         return Json(UploadResponse {
                             ok: false,
                             name: filename,
@@ -371,17 +421,23 @@ async fn upload_file(
                     // Emit progress every 256 KB
                     if bytes_received - last_report >= 262_144 {
                         last_report = bytes_received;
-                        state.event_tx.send(ServerEvent::WebUploadProgress {
-                            transfer_id: transfer_id.clone(),
-                            bytes_received,
-                            total: content_length,
-                        }).ok();
+                        state
+                            .event_tx
+                            .send(ServerEvent::WebUploadProgress {
+                                transfer_id: transfer_id.clone(),
+                                bytes_received,
+                                total: content_length,
+                            })
+                            .ok();
                     }
                 }
                 Ok(None) => break,
                 Err(e) => {
                     tokio::fs::remove_file(&tmp_path).await.ok();
-                    state.event_tx.send(ServerEvent::WebUploadFailed { transfer_id }).ok();
+                    state
+                        .event_tx
+                        .send(ServerEvent::WebUploadFailed { transfer_id })
+                        .ok();
                     return Json(UploadResponse {
                         ok: false,
                         name: filename,
@@ -398,7 +454,10 @@ async fn upload_file(
         // Rename temp → final destination (atomic on same fs)
         if let Err(e) = tokio::fs::rename(&tmp_path, &dest_path).await {
             tokio::fs::remove_file(&tmp_path).await.ok();
-            state.event_tx.send(ServerEvent::WebUploadFailed { transfer_id }).ok();
+            state
+                .event_tx
+                .send(ServerEvent::WebUploadFailed { transfer_id })
+                .ok();
             return Json(UploadResponse {
                 ok: false,
                 name: filename,
@@ -422,13 +481,17 @@ async fn upload_file(
                 let name = item.name.clone();
                 let id = item.id.clone();
                 let size_human = item.size_human();
-                state.event_tx.send(ServerEvent::WebUploadFinished {
-                    transfer_id,
-                }).ok();
-                state.event_tx.send(ServerEvent::Uploaded {
-                    item_name: name.clone(),
-                    by_addr: addr.ip().to_string(),
-                }).ok();
+                state
+                    .event_tx
+                    .send(ServerEvent::WebUploadFinished { transfer_id })
+                    .ok();
+                state
+                    .event_tx
+                    .send(ServerEvent::Uploaded {
+                        item_name: name.clone(),
+                        by_addr: addr.ip().to_string(),
+                    })
+                    .ok();
                 Json(UploadResponse {
                     ok: true,
                     name,
@@ -439,7 +502,10 @@ async fn upload_file(
                 .into_response()
             }
             Ok(Err(e)) => {
-                state.event_tx.send(ServerEvent::WebUploadFailed { transfer_id }).ok();
+                state
+                    .event_tx
+                    .send(ServerEvent::WebUploadFailed { transfer_id })
+                    .ok();
                 Json(UploadResponse {
                     ok: false,
                     name: filename,
@@ -450,7 +516,10 @@ async fn upload_file(
                 .into_response()
             }
             Err(e) => {
-                state.event_tx.send(ServerEvent::WebUploadFailed { transfer_id }).ok();
+                state
+                    .event_tx
+                    .send(ServerEvent::WebUploadFailed { transfer_id })
+                    .ok();
                 Json(UploadResponse {
                     ok: false,
                     name: filename,
@@ -730,15 +799,14 @@ fn html_escape(s: &str) -> String {
 }
 
 /// DELETE /shares/:id  — removes a share from the registry.
-async fn delete_share(
-    State(state): State<Arc<AppState>>,
-    Path(id): Path<String>,
-) -> Response {
+async fn delete_share(State(state): State<Arc<AppState>>, Path(id): Path<String>) -> Response {
     match state.shares.remove(&id) {
         Some(item) => {
             state
                 .event_tx
-                .send(ServerEvent::Deleted { item_name: item.name })
+                .send(ServerEvent::Deleted {
+                    item_name: item.name,
+                })
                 .ok();
             (StatusCode::OK, Json(serde_json::json!({ "ok": true }))).into_response()
         }
@@ -758,7 +826,10 @@ pub fn build_router_with_connect_info(
         .route("/shares", get(list_shares))
         .route("/shares/{id}", delete(delete_share))
         .route("/download/{id}", get(download_file))
-        .route("/upload", post(upload_file).layer(DefaultBodyLimit::disable()))
+        .route(
+            "/upload",
+            post(upload_file).layer(DefaultBodyLimit::disable()),
+        )
         .with_state(state)
         .into_make_service_with_connect_info::<std::net::SocketAddr>()
 }

@@ -3,13 +3,13 @@ use chrono::{DateTime, Utc};
 use nanoid::nanoid;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use zip::write::FileOptions;
 use std::collections::HashMap;
 use std::fs;
 use std::io::{BufReader, Read};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, RwLock};
 use walkdir::WalkDir;
+use zip::write::FileOptions;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub enum ShareKind {
@@ -257,8 +257,7 @@ impl ShareRegistry {
         let size = fs::metadata(&path)?.len();
         // FIX: streaming checksum — no whole-file load into memory
         let checksum = compute_checksum_streaming(&path)?;
-        let expires_at =
-            expires_in_mins.map(|m| Utc::now() + chrono::Duration::minutes(m as i64));
+        let expires_at = expires_in_mins.map(|m| Utc::now() + chrono::Duration::minutes(m as i64));
 
         Ok(SharedItem {
             id: nanoid!(8),
@@ -282,8 +281,7 @@ impl ShareRegistry {
         mut on_zipping: impl FnMut(&str, usize, usize),
     ) -> Result<SharedItem> {
         let name = path.file_name().unwrap().to_string_lossy().to_string();
-        let expires_at =
-            expires_in_mins.map(|m| Utc::now() + chrono::Duration::minutes(m as i64));
+        let expires_at = expires_in_mins.map(|m| Utc::now() + chrono::Duration::minutes(m as i64));
 
         let (file_count, max_depth) = analyse_folder(&path);
         let should_zip = file_count > 20 || max_depth > 5;
@@ -327,9 +325,15 @@ impl ShareRegistry {
         should_zip: bool,
         mut on_zipping: impl FnMut(&str, usize, usize) + Send + 'static,
     ) -> Result<SharedItem> {
-        crate::config::debug_log(&format!("shares::add_with_zip_choice() input path = {:?}", path));
+        crate::config::debug_log(&format!(
+            "shares::add_with_zip_choice() input path = {:?}",
+            path
+        ));
         let canon = path.canonicalize();
-        crate::config::debug_log(&format!("shares::add_with_zip_choice() canonicalize = {:?}", canon));
+        crate::config::debug_log(&format!(
+            "shares::add_with_zip_choice() canonicalize = {:?}",
+            canon
+        ));
         let path = canon?;
         if path.is_file() {
             let item = self.add_file(path, download_limit, expires_in_mins)?;
@@ -345,8 +349,7 @@ impl ShareRegistry {
         }
 
         let name = path.file_name().unwrap().to_string_lossy().to_string();
-        let expires_at =
-            expires_in_mins.map(|m| Utc::now() + chrono::Duration::minutes(m as i64));
+        let expires_at = expires_in_mins.map(|m| Utc::now() + chrono::Duration::minutes(m as i64));
         let (file_count, _, total_size) = analyse_folder_full(&path);
 
         let (final_path, kind, size, checksum) = if should_zip {
@@ -420,7 +423,10 @@ impl ShareRegistry {
     }
 
     pub fn list_available(&self) -> Vec<SharedItem> {
-        self.list().into_iter().filter(|i| i.is_available()).collect()
+        self.list()
+            .into_iter()
+            .filter(|i| i.is_available())
+            .collect()
     }
 
     /// Increment download counter. Only marks dirty; the periodic background
@@ -445,7 +451,9 @@ impl ShareRegistry {
             .map(|v| v.path.clone())
             .collect();
         let had_any = !to_delete.is_empty()
-            || store.values().any(|v| v.is_expired() || v.is_limit_reached());
+            || store
+                .values()
+                .any(|v| v.is_expired() || v.is_limit_reached());
         store.retain(|_, v| !v.is_expired() && !v.is_limit_reached());
         drop(store);
 
@@ -569,11 +577,7 @@ pub fn zip_folder_pub(src: &Path, dest: &Path) -> Result<()> {
 ///      single-writer while compression is fully parallel.
 ///
 /// `on_progress(files_done, total_files)` is called after each file is written.
-fn zip_folder(
-    src: &Path,
-    dest: &Path,
-    mut on_progress: impl FnMut(usize, usize),
-) -> Result<()> {
+fn zip_folder(src: &Path, dest: &Path, mut on_progress: impl FnMut(usize, usize)) -> Result<()> {
     use flate2::{write::DeflateEncoder, Compression};
     use rayon::prelude::*;
     use std::io::Write;

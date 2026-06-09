@@ -92,7 +92,7 @@ impl PeerRegistry {
         peers.values().cloned().collect()
     }
 
-        pub fn add_manual(&self, addr: IpAddr, port: u16) {
+    pub fn add_manual(&self, addr: IpAddr, port: u16) {
         let key = format!("{}:{}", addr, port);
         let mut peers = self.inner.write().unwrap();
         peers.insert(
@@ -113,8 +113,6 @@ impl PeerRegistry {
         let mut peers = self.inner.write().unwrap();
         peers.remove(&key);
     }
-
-
 }
 
 // ---------------------------------------------------------------------------
@@ -172,12 +170,7 @@ pub async fn run_mdns(
                         .and_then(|p| p.val_str().parse::<usize>().ok())
                         .unwrap_or(0);
 
-                    if let Some(addr) = info
-                        .get_addresses_v4()
-                        .into_iter()
-                        .next()
-                        .map(IpAddr::V4)
-                    {
+                    if let Some(addr) = info.get_addresses_v4().into_iter().next().map(IpAddr::V4) {
                         registry.upsert(addr, new_port, username, share_count);
                     }
                 }
@@ -215,20 +208,11 @@ pub async fn run_mdns(
 
         let props = build_props(&username, count);
 
-        let service = ServiceInfo::new(
-            SERVICE_TYPE,
-            &instance,
-            &host,
-            "",
-            port,
-            Some(props),
-        )?
-        .enable_addr_auto();
+        let service = ServiceInfo::new(SERVICE_TYPE, &instance, &host, "", port, Some(props))?
+            .enable_addr_auto();
 
         daemon.register(service)?;
-
     }
-    
 }
 
 // ---------------------------------------------------------------------------
@@ -242,14 +226,20 @@ fn build_props(username: &str, share_count: usize) -> HashMap<String, String> {
 
     m.insert("app".to_owned(), APP_ID.to_owned());
     m.insert("version".to_owned(), PROTOCOL_VERSION.to_owned());
-    
+
     m
 }
 
 fn sanitise_instance_name(name: &str) -> String {
     let s: String = name
         .chars()
-        .map(|c| if c.is_alphanumeric() || c == '-' { c } else { '_' })
+        .map(|c| {
+            if c.is_alphanumeric() || c == '-' {
+                c
+            } else {
+                '_'
+            }
+        })
         .collect();
 
     s[..s.len().min(63)].to_owned()

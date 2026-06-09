@@ -48,30 +48,31 @@ pub(crate) fn looks_like_path(s: &str) -> bool {
     s.starts_with('/') || s.starts_with('\\') || (s.len() >= 3 && s.chars().nth(1) == Some(':'))
 }
 
-fn try_share_path(
-    raw: &str,
-    shares: &ShareRegistry,
-    event_tx: &mpsc::Sender<AppEvent>,
-) {
+fn try_share_path(raw: &str, shares: &ShareRegistry, event_tx: &mpsc::Sender<AppEvent>) {
     let cleaned = deduplicate_path(raw.trim().trim_matches('"').trim_matches('\''));
     let path = PathBuf::from(&cleaned);
-    crate::config::debug_log(&format!("try_share_path: raw={:?} cleaned={:?} exists={}", raw, cleaned, path.exists()));
+    crate::config::debug_log(&format!(
+        "try_share_path: raw={:?} cleaned={:?} exists={}",
+        raw,
+        cleaned,
+        path.exists()
+    ));
     let etx = event_tx.clone();
     let shares_c = shares.clone();
     tokio::spawn(async move {
         if !path.exists() {
-            etx.send(AppEvent::ShareError(format!("Path not found: {}", cleaned))).await.ok();
+            etx.send(AppEvent::ShareError(format!("Path not found: {}", cleaned)))
+                .await
+                .ok();
             return;
         }
         if path.is_dir() {
             // Analyse folder first, then ask the user whether to zip
             let path_c = path.clone();
             let (file_count, max_depth, total_size) =
-                tokio::task::spawn_blocking(move || {
-                    crate::shares::analyse_folder_full(&path_c)
-                })
-                .await
-                .unwrap_or((0, 0, 0));
+                tokio::task::spawn_blocking(move || crate::shares::analyse_folder_full(&path_c))
+                    .await
+                    .unwrap_or((0, 0, 0));
 
             let folder_name = path
                 .file_name()
@@ -94,10 +95,18 @@ fn try_share_path(
             let etx2 = etx.clone();
             match shares_c.add(path, None, None, move |folder_name, done, total| {
                 let folder = folder_name.to_string();
-                let _ = etx2.try_send(AppEvent::ZipProgress { folder, done, total });
+                let _ = etx2.try_send(AppEvent::ZipProgress {
+                    folder,
+                    done,
+                    total,
+                });
             }) {
-                Ok(item) => { etx.send(AppEvent::ShareAdded(item)).await.ok(); }
-                Err(e) => { etx.send(AppEvent::ShareError(e.to_string())).await.ok(); }
+                Ok(item) => {
+                    etx.send(AppEvent::ShareAdded(item)).await.ok();
+                }
+                Err(e) => {
+                    etx.send(AppEvent::ShareError(e.to_string())).await.ok();
+                }
             }
         }
     });
@@ -145,8 +154,11 @@ pub async fn run(
     tokio::spawn(async move {
         loop {
             match server_events.recv().await {
-                Ok(ev) => { etx.send(AppEvent::ServerEvent(ev)).await.ok(); }
-                Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => { /* receiver caught up, keep going */ }
+                Ok(ev) => {
+                    etx.send(AppEvent::ServerEvent(ev)).await.ok();
+                }
+                Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => { /* receiver caught up, keep going */
+                }
                 Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
             }
         }
@@ -185,13 +197,12 @@ pub async fn run(
         // so keyboard input is never starved by a full channel.
         while let Ok(ev) = event_rx.try_recv() {
             if let AppEvent::AddShare(ref p) = ev {
-                    let raw = p.to_string_lossy().to_string();
-                    try_share_path(&raw, &shares, &event_tx);
+                let raw = p.to_string_lossy().to_string();
+                try_share_path(&raw, &shares, &event_tx);
             } else {
                 app.handle_event(ev);
             }
         }
-
 
         // --- Phase 3: render ---
         terminal.draw(|f| ui::draw(f, &app))?;
@@ -332,7 +343,7 @@ pub async fn run(
         }
     }
     // Persist UI preferences so they survive across restarts
-    app.config.theme_idx      = app.theme_idx;
+    app.config.theme_idx = app.theme_idx;
     app.config.speed_unit_bits = app.speed_unit == crate::tui::app::SpeedUnit::Bits;
     app.config.save().ok();
 

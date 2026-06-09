@@ -8,9 +8,9 @@ mod tui;
 
 use anyhow::Result;
 use clap::{Parser, Subcommand};
-use std::{env, net::SocketAddr};
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::{env, net::SocketAddr};
 use tokio::sync::broadcast;
 
 use config::Config;
@@ -66,7 +66,11 @@ async fn main() -> Result<()> {
             }
             return Ok(());
         }
-        Some(Commands::Send { path, limit, expires }) => {
+        Some(Commands::Send {
+            path,
+            limit,
+            expires,
+        }) => {
             return run_send(cli.username, cli.port, path, limit, expires).await;
         }
         None => {}
@@ -111,7 +115,10 @@ fn prompt_username() -> Result<String> {
 async fn run_tui(username_override: Option<String>, port_override: Option<u16>) -> Result<()> {
     let config = setup(username_override, port_override).await?;
 
-    crate::config::debug_log(&format!("run_tui: config.download_dir = {:?}", config.download_dir));
+    crate::config::debug_log(&format!(
+        "run_tui: config.download_dir = {:?}",
+        config.download_dir
+    ));
 
     let cache_dir = config
         .download_dir
@@ -207,7 +214,11 @@ async fn run_send(
 ) -> Result<()> {
     let config = setup(username_override, port_override).await?;
 
-    let cache_dir = config.download_dir.parent().unwrap_or(&config.download_dir).join(".fileshare_zip_cache");
+    let cache_dir = config
+        .download_dir
+        .parent()
+        .unwrap_or(&config.download_dir)
+        .join(".fileshare_zip_cache");
     let index_path = Config::config_path()
         .parent()
         .map(|p| p.to_path_buf())
@@ -216,7 +227,10 @@ async fn run_send(
     let shares = ShareRegistry::new(cache_dir, index_path);
     let item = shares.add(path, limit, expires, |name, done, total| {
         let pct = (done * 100).checked_div(total).unwrap_or(0);
-        eprint!("\rZipping '{}' ... {}/{} files ({}%)   ", name, done, total, pct);
+        eprint!(
+            "\rZipping '{}' ... {}/{} files ({}%)   ",
+            name, done, total, pct
+        );
     })?;
     eprintln!();
     println!(

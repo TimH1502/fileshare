@@ -36,7 +36,11 @@ pub async fn fetch_peer_shares(base_url: &str) -> Result<ListResponse> {
 }
 
 #[derive(Debug, Clone, PartialEq)]
-pub enum DownloadControl { Running, Paused, Cancelled }
+pub enum DownloadControl {
+    Running,
+    Paused,
+    Cancelled,
+}
 
 pub struct DownloadProgress {
     pub bytes_downloaded: u64,
@@ -127,7 +131,11 @@ pub async fn download_file(
                     .clone()
                     .unwrap_or_else(|| download_dir.join(share_name));
                 tokio::fs::rename(&tmp_path, &dest).await?;
-                return Ok(DownloadResult { path: dest, checksum_ok: None, cancelled: false });
+                return Ok(DownloadResult {
+                    path: dest,
+                    checksum_ok: None,
+                    cancelled: false,
+                });
             }
             s => {
                 tokio::fs::remove_file(&tmp_path).await.ok();
@@ -213,7 +221,9 @@ pub async fn download_file(
                     let elapsed = now.duration_since(last_time).as_secs_f64();
                     let new_speed = if elapsed > 0.0 {
                         (downloaded - last_bytes) as f64 / elapsed
-                    } else { 0.0 };
+                    } else {
+                        0.0
+                    };
 
                     let (eta_seconds, new_smooth) =
                         calc_eta_seconds(smoothed_speed, new_speed, alpha, total, downloaded);
@@ -242,7 +252,11 @@ pub async fn download_file(
                 DownloadControl::Cancelled => {
                     drop(file);
                     tokio::fs::remove_file(&tmp_path).await.ok();
-                    return Ok(DownloadResult { path: tmp_path, checksum_ok: None, cancelled: true });
+                    return Ok(DownloadResult {
+                        path: tmp_path,
+                        checksum_ok: None,
+                        cancelled: true,
+                    });
                 }
                 DownloadControl::Paused => {
                     // Hold connection until resumed or cancelled
@@ -252,14 +266,22 @@ pub async fn download_file(
                                 // Sender dropped without sending Cancelled — treat as cancel
                                 drop(file);
                                 tokio::fs::remove_file(&tmp_path).await.ok();
-                                return Ok(DownloadResult { path: tmp_path, checksum_ok: None, cancelled: true });
+                                return Ok(DownloadResult {
+                                    path: tmp_path,
+                                    checksum_ok: None,
+                                    cancelled: true,
+                                });
                             }
                             Ok(_) => {
                                 let new_ctrl = pause_rx.borrow().clone();
                                 if new_ctrl == DownloadControl::Cancelled {
                                     drop(file);
                                     tokio::fs::remove_file(&tmp_path).await.ok();
-                                    return Ok(DownloadResult { path: tmp_path, checksum_ok: None, cancelled: true });
+                                    return Ok(DownloadResult {
+                                        path: tmp_path,
+                                        checksum_ok: None,
+                                        cancelled: true,
+                                    });
                                 }
                                 if new_ctrl == DownloadControl::Running {
                                     break; // resumed
@@ -289,10 +311,18 @@ pub async fn download_file(
 
             let checksum_ok = expected_checksum.map(|expected| {
                 let actual = hex::encode(hasher.finalize());
-                if expected.starts_with("dir:") { true } else { actual == expected }
+                if expected.starts_with("dir:") {
+                    true
+                } else {
+                    actual == expected
+                }
             });
 
-            return Ok(DownloadResult { path: dest, checksum_ok, cancelled: false });
+            return Ok(DownloadResult {
+                path: dest,
+                checksum_ok,
+                cancelled: false,
+            });
         }
 
         // Stream broke mid-transfer — flush what we have and retry
@@ -315,7 +345,13 @@ pub async fn download_file(
     }
 }
 
-pub fn calc_eta_seconds(mut smoothed_speed: f64, new_speed: f64, alpha: f64, total: u64, downloaded: u64) -> (f64, f64) {
+pub fn calc_eta_seconds(
+    mut smoothed_speed: f64,
+    new_speed: f64,
+    alpha: f64,
+    total: u64,
+    downloaded: u64,
+) -> (f64, f64) {
     smoothed_speed = if smoothed_speed == 0.0 {
         new_speed
     } else {
@@ -323,7 +359,9 @@ pub fn calc_eta_seconds(mut smoothed_speed: f64, new_speed: f64, alpha: f64, tot
     };
     let eta_seconds = if smoothed_speed > 0.0 {
         total.saturating_sub(downloaded) as f64 / smoothed_speed
-    } else { 0.0 };
+    } else {
+        0.0
+    };
     (eta_seconds, smoothed_speed)
 }
 
@@ -401,7 +439,10 @@ mod tests {
         let (_, smooth1) = calc_eta_seconds(0.0, 10_000_000.0, 0.15, 100_000_000, 0);
         let (_, smooth2) = calc_eta_seconds(smooth1, 20_000_000.0, 0.15, 100_000_000, 0);
         assert!(smooth2 > smooth1, "speed should increase toward new value");
-        assert!(smooth2 < 20_000_000.0, "should not jump fully to new sample");
+        assert!(
+            smooth2 < 20_000_000.0,
+            "should not jump fully to new sample"
+        );
     }
 
     #[test]
@@ -440,15 +481,18 @@ mod tests {
         use axum::{routing::get, Router};
         use std::net::SocketAddr;
 
-        let app = Router::new().route("/download/{id}", get(|| async {
-            // 1 MB of zeros
-            let body = vec![0u8; 1_024 * 1_024];
-            axum::response::Response::builder()
-                .header("content-length", body.len().to_string())
-                .header("accept-ranges", "bytes")
-                .body(axum::body::Body::from(body))
-                .unwrap()
-        }));
+        let app = Router::new().route(
+            "/download/{id}",
+            get(|| async {
+                // 1 MB of zeros
+                let body = vec![0u8; 1_024 * 1_024];
+                axum::response::Response::builder()
+                    .header("content-length", body.len().to_string())
+                    .header("accept-ranges", "bytes")
+                    .body(axum::body::Body::from(body))
+                    .unwrap()
+            }),
+        );
 
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr: SocketAddr = listener.local_addr().unwrap();
@@ -470,7 +514,16 @@ mod tests {
 
         // Run download in background, cancel after a short delay
         let handle = tokio::spawn(async move {
-            download_file(&base, "test", "test_file.bin", &dir2, prog_tx, retry_tx, pause_rx).await
+            download_file(
+                &base,
+                "test",
+                "test_file.bin",
+                &dir2,
+                prog_tx,
+                retry_tx,
+                pause_rx,
+            )
+            .await
         });
 
         // Let the task start and enter pause wait
@@ -496,24 +549,31 @@ mod tests {
         use tokio::time::Duration;
 
         // Serve body slowly in chunks so cancel can race the stream
-        let app = Router::new().route("/download/{id}", get(|| async {
-            // Use futures::stream::unfold — no extra crate needed
-            let stream = futures::stream::unfold(0u32, |i| async move {
-                if i >= 100 { return None; }
-                tokio::time::sleep(tokio::time::Duration::from_millis(5)).await;
-                let chunk = bytes::Bytes::from(vec![0u8; 10_240]);
-                Some((Ok::<_, std::convert::Infallible>(chunk), i + 1))
-            });
-            axum::response::Response::builder()
-                .header("content-length", (100 * 10_240).to_string())
-                .header("accept-ranges", "bytes")
-                .body(axum::body::Body::from_stream(stream))
-                .unwrap()
-        }));
+        let app = Router::new().route(
+            "/download/{id}",
+            get(|| async {
+                // Use futures::stream::unfold — no extra crate needed
+                let stream = futures::stream::unfold(0u32, |i| async move {
+                    if i >= 100 {
+                        return None;
+                    }
+                    tokio::time::sleep(tokio::time::Duration::from_millis(5)).await;
+                    let chunk = bytes::Bytes::from(vec![0u8; 10_240]);
+                    Some((Ok::<_, std::convert::Infallible>(chunk), i + 1))
+                });
+                axum::response::Response::builder()
+                    .header("content-length", (100 * 10_240).to_string())
+                    .header("accept-ranges", "bytes")
+                    .body(axum::body::Body::from_stream(stream))
+                    .unwrap()
+            }),
+        );
 
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr: SocketAddr = listener.local_addr().unwrap();
-        tokio::spawn(async move { axum::serve(listener, app).await.unwrap(); });
+        tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
 
         let dir = tempfile::tempdir().unwrap();
         let dir_path = dir.path().to_path_buf();
@@ -525,7 +585,16 @@ mod tests {
         let dir2 = dir_path.clone();
 
         let handle = tokio::spawn(async move {
-            download_file(&base, "test", "test_file.bin", &dir2, prog_tx, retry_tx, pause_rx).await
+            download_file(
+                &base,
+                "test",
+                "test_file.bin",
+                &dir2,
+                prog_tx,
+                retry_tx,
+                pause_rx,
+            )
+            .await
         });
 
         // Let a few chunks land, then cancel
@@ -539,7 +608,10 @@ mod tests {
         assert!(!tmp.exists(), "temp file should be deleted on cancel");
         // Final file must not exist either
         let final_file = dir_path.join("test_file.bin");
-        assert!(!final_file.exists(), "final file must not exist after cancel");
+        assert!(
+            !final_file.exists(),
+            "final file must not exist after cancel"
+        );
     }
 
     // -----------------------------------------------------------------------
@@ -548,51 +620,64 @@ mod tests {
 
     #[tokio::test]
     async fn test_resume_sends_range_header() {
-        use axum::{routing::get, Router, extract::Request};
+        use axum::{extract::Request, routing::get, Router};
         use std::net::SocketAddr;
         use std::sync::{Arc, Mutex};
 
         let range_seen: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
         let range_seen2 = range_seen.clone();
 
-        let app = Router::new().route("/download/{id}", get(move |req: Request| {
-            let range_seen = range_seen2.clone();
-            async move {
-                let range_hdr = req.headers()
-                    .get("range")
-                    .and_then(|v| v.to_str().ok())
-                    .map(|s| s.to_string());
-                *range_seen.lock().unwrap() = range_hdr.clone();
+        let app = Router::new().route(
+            "/download/{id}",
+            get(move |req: Request| {
+                let range_seen = range_seen2.clone();
+                async move {
+                    let range_hdr = req
+                        .headers()
+                        .get("range")
+                        .and_then(|v| v.to_str().ok())
+                        .map(|s| s.to_string());
+                    *range_seen.lock().unwrap() = range_hdr.clone();
 
-                if let Some(range) = range_hdr {
-                    // Parse "bytes=N-"
-                    let start: u64 = range
-                        .strip_prefix("bytes=").unwrap_or("0-")
-                        .split('-').next().unwrap_or("0")
-                        .parse().unwrap_or(0);
-                    let total: u64 = 1024;
-                    let remaining = total - start;
-                    axum::response::Response::builder()
-                        .status(206)
-                        .header("content-length", remaining.to_string())
-                        .header("content-range", format!("bytes {}-{}/{}", start, total-1, total))
-                        .header("accept-ranges", "bytes")
-                        .body(axum::body::Body::from(vec![0u8; remaining as usize]))
-                        .unwrap()
-                } else {
-                    axum::response::Response::builder()
-                        .status(200)
-                        .header("content-length", "1024")
-                        .header("accept-ranges", "bytes")
-                        .body(axum::body::Body::from(vec![0u8; 1024]))
-                        .unwrap()
+                    if let Some(range) = range_hdr {
+                        // Parse "bytes=N-"
+                        let start: u64 = range
+                            .strip_prefix("bytes=")
+                            .unwrap_or("0-")
+                            .split('-')
+                            .next()
+                            .unwrap_or("0")
+                            .parse()
+                            .unwrap_or(0);
+                        let total: u64 = 1024;
+                        let remaining = total - start;
+                        axum::response::Response::builder()
+                            .status(206)
+                            .header("content-length", remaining.to_string())
+                            .header(
+                                "content-range",
+                                format!("bytes {}-{}/{}", start, total - 1, total),
+                            )
+                            .header("accept-ranges", "bytes")
+                            .body(axum::body::Body::from(vec![0u8; remaining as usize]))
+                            .unwrap()
+                    } else {
+                        axum::response::Response::builder()
+                            .status(200)
+                            .header("content-length", "1024")
+                            .header("accept-ranges", "bytes")
+                            .body(axum::body::Body::from(vec![0u8; 1024]))
+                            .unwrap()
+                    }
                 }
-            }
-        }));
+            }),
+        );
 
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr: SocketAddr = listener.local_addr().unwrap();
-        tokio::spawn(async move { axum::serve(listener, app).await.unwrap(); });
+        tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
 
         let dir = tempfile::tempdir().unwrap();
         let dir_path = dir.path().to_path_buf();
@@ -606,14 +691,27 @@ mod tests {
         let (_, pause_rx) = watch::channel(DownloadControl::Running);
 
         let base = format!("http://{}", addr);
-        let result = download_file(&base, "resume_test", "out.bin", &dir_path, prog_tx, retry_tx, pause_rx)
-            .await.unwrap();
+        let result = download_file(
+            &base,
+            "resume_test",
+            "out.bin",
+            &dir_path,
+            prog_tx,
+            retry_tx,
+            pause_rx,
+        )
+        .await
+        .unwrap();
 
         assert!(!result.cancelled);
         // Range header should have been sent with offset 512
         let seen = range_seen.lock().unwrap().clone();
-        assert_eq!(seen, Some("bytes=512-".to_string()),
-            "expected Range: bytes=512-, got {:?}", seen);
+        assert_eq!(
+            seen,
+            Some("bytes=512-".to_string()),
+            "expected Range: bytes=512-, got {:?}",
+            seen
+        );
     }
 
     // -----------------------------------------------------------------------
@@ -628,22 +726,27 @@ mod tests {
         let content = b"Hello, fileshare!".to_vec();
         let content2 = content.clone();
 
-        let app = Router::new().route("/download/{id}", get(move || {
-            let body = content2.clone();
-            async move {
-                axum::response::Response::builder()
-                    .status(200)
-                    .header("content-length", body.len().to_string())
-                    .header("accept-ranges", "bytes")
-                    .header("content-disposition", "attachment; filename=\"hello.txt\"")
-                    .body(axum::body::Body::from(body))
-                    .unwrap()
-            }
-        }));
+        let app = Router::new().route(
+            "/download/{id}",
+            get(move || {
+                let body = content2.clone();
+                async move {
+                    axum::response::Response::builder()
+                        .status(200)
+                        .header("content-length", body.len().to_string())
+                        .header("accept-ranges", "bytes")
+                        .header("content-disposition", "attachment; filename=\"hello.txt\"")
+                        .body(axum::body::Body::from(body))
+                        .unwrap()
+                }
+            }),
+        );
 
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr: SocketAddr = listener.local_addr().unwrap();
-        tokio::spawn(async move { axum::serve(listener, app).await.unwrap(); });
+        tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
 
         let dir = tempfile::tempdir().unwrap();
         let (prog_tx, _) = mpsc::channel(32);
@@ -651,9 +754,16 @@ mod tests {
         let (_, pause_rx) = watch::channel(DownloadControl::Running);
 
         let result = download_file(
-            &format!("http://{}", addr), "id1", "hello.txt",
-            &dir.path().to_path_buf(), prog_tx, retry_tx, pause_rx,
-        ).await.unwrap();
+            &format!("http://{}", addr),
+            "id1",
+            "hello.txt",
+            &dir.path().to_path_buf(),
+            prog_tx,
+            retry_tx,
+            pause_rx,
+        )
+        .await
+        .unwrap();
 
         assert!(!result.cancelled);
         let written = tokio::fs::read(&result.path).await.unwrap();
