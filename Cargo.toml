@@ -1,12 +1,28 @@
 [package]
 name = "fileshare"
-version = "1.0.6"
+version = "1.0.7"
 edition = "2021"
 description = "A local network file sharing CLI tool"
 
 [[bin]]
 name = "fileshare"
 path = "src/main.rs"
+
+# ── Profiles ────────────────────────────────────────────────────────────────
+[profile.dev]
+# Faster incremental builds: less optimization, faster linking
+opt-level = 0          # default — no change, just explicit
+debug = true
+incremental = true     # cache unchanged codegen units
+split-debuginfo = "unpacked"  # faster debug builds on macOS/Linux
+
+[profile.release]
+opt-level = 3          # maximum optimization
+lto = "thin"           # link-time optimization across crates (thin = fast+good)
+codegen-units = 1      # single unit = better inlining, smaller binary
+strip = "symbols"      # drop debug symbols → noticeably smaller .exe/.bin
+panic = "abort"        # no unwinding machinery → smaller binary
+
 
 [dependencies]
 # Async runtime
