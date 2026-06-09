@@ -259,10 +259,16 @@ impl ShareRegistry {
         let checksum = compute_checksum_streaming(&path)?;
         let expires_at = expires_in_mins.map(|m| Utc::now() + chrono::Duration::minutes(m as i64));
 
+        let kind = if path.extension().and_then(|e| e.to_str()) == Some("zip") {
+            ShareKind::ZippedFolder
+        } else {
+            ShareKind::File
+        };
+
         Ok(SharedItem {
             id: nanoid!(8),
             name,
-            kind: ShareKind::File,
+            kind,
             size,
             path,
             checksum,
@@ -298,14 +304,20 @@ impl ShareRegistry {
             (zip_path, ShareKind::ZippedFolder, size, checksum)
         } else {
             let size = folder_size(&path);
-            // FIX: real integrity fingerprint instead of placeholder "dir:N"
             let checksum = compute_folder_checksum(&path);
             (path, ShareKind::Folder, size, checksum)
         };
 
+        // Use the actual filename of the final path as the display name so a
+        // zipped folder shows as "src.zip" rather than "src".
+        let display_name = final_path
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or(name);
+
         Ok(SharedItem {
             id: nanoid!(8),
-            name,
+            name: display_name,
             kind,
             size,
             path: final_path,
@@ -369,7 +381,10 @@ impl ShareRegistry {
 
         let item = SharedItem {
             id: nanoid!(8),
-            name,
+            name: final_path
+                .file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or(name),
             kind,
             size,
             path: final_path,
