@@ -1,5 +1,7 @@
 # fileshare
 
+[![License](https://img.shields.io/badge/license-Apache%202.0-blue.svg)](LICENSE)
+
 A fast, zero-config local network file sharing CLI. Share files and folders with anyone on your LAN — with a live TUI showing peers, their files, and your active shares. Also accessible from any browser on the network with full upload, download, and delete support.
 
 ## Features
@@ -81,7 +83,6 @@ The status bar at the bottom always shows the shortcuts available in the current
 | `m` | My Shares | Enter a file/folder path manually |
 | `x` / `Delete` | My Shares | Remove share (file untouched) |
 | `r` | Any | Toggle QR code overlay for browser URL |
-| `u` | Any | Toggle download speed unit: MB/s ↔ Mb/s |
 | `?` | Any | Toggle help overlay |
 | `q` / `Ctrl+C` | Any | Quit |
 
@@ -200,3 +201,11 @@ src/
 ## Security note
 
 This tool is designed for **trusted local networks**. The HTTPS server binds to all interfaces (`0.0.0.0`). The self-signed certificate is accepted by the CLI client unconditionally (both ends are yours), and browsers show a one-time warning on first visit. Do not expose port 7777 to the public internet.
+
+## Contributing
+
+See [CONTRIBUTING.md](CONTRIBUTING.md). Issues and pull requests welcome.
+
+## License
+
+Apache 2.0 — see [LICENSE](LICENSE).
