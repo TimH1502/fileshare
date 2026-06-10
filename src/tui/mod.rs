@@ -48,6 +48,64 @@ pub(crate) fn looks_like_path(s: &str) -> bool {
     s.starts_with('/') || s.starts_with('\\') || (s.len() >= 3 && s.chars().nth(1) == Some(':'))
 }
 
+/// Split a raw drop/paste string into individual paths.
+///
+/// Terminals emit multiple dragged files as a space-separated list, quoting
+/// paths that contain spaces. This handles both single and double quotes and
+/// the mixed case of some paths quoted, some not.
+///
+/// Examples:
+///   `/a/b.txt /c/d.txt`                    → ["/a/b.txt", "/c/d.txt"]
+///   `"/a/b c.txt" /d/e.txt`                → ["/a/b c.txt", "/d/e.txt"]
+///   `C:\Users\Tim\a.txt C:\Users\Tim\b.txt` → ["C:\Users\Tim\a.txt", "C:\Users\Tim\b.txt"]
+pub(crate) fn split_dropped_paths(raw: &str) -> Vec<String> {
+    let mut paths: Vec<String> = Vec::new();
+    let mut current = String::new();
+    let mut in_quotes = false;
+    let mut quote_char = '"';
+
+    for ch in raw.chars() {
+        match ch {
+            '"' | '\'' if !in_quotes => {
+                in_quotes = true;
+                quote_char = ch;
+            }
+            c if in_quotes && c == quote_char => {
+                in_quotes = false;
+            }
+            ' ' | '\t' | '\n' | '\r' if !in_quotes => {
+                let trimmed = current.trim().to_string();
+                if !trimmed.is_empty() {
+                    paths.push(trimmed);
+                }
+                current.clear();
+            }
+            c => current.push(c),
+        }
+    }
+    let trimmed = current.trim().to_string();
+    if !trimmed.is_empty() {
+        paths.push(trimmed);
+    }
+
+    // If nothing looked like a multi-path string, return the whole raw input
+    // as one entry so the caller can still run looks_like_path on it.
+    if paths.is_empty() {
+        let fallback = raw.trim().to_string();
+        if !fallback.is_empty() {
+            paths.push(fallback);
+        }
+    }
+    paths
+}
+
+/// Dispatch every path in a raw drop/paste string to try_share_path.
+fn share_dropped_paths(raw: &str, shares: &ShareRegistry, event_tx: &mpsc::Sender<AppEvent>) {
+    for path_str in split_dropped_paths(raw) {
+        try_share_path(&path_str, shares, event_tx);
+    }
+}
+
 fn try_share_path(raw: &str, shares: &ShareRegistry, event_tx: &mpsc::Sender<AppEvent>) {
     let cleaned = deduplicate_path(raw.trim().trim_matches('"').trim_matches('\''));
     let path = PathBuf::from(&cleaned);
@@ -182,7 +240,7 @@ pub async fn run(
                 accumulating = false;
                 let deduped = deduplicate_path(&raw);
                 if looks_like_path(&deduped) {
-                    try_share_path(&raw, &shares, &event_tx);
+                    share_dropped_paths(&raw, &shares, &event_tx);
                 } else if raw.len() == 1 {
                     let c = raw.chars().next().unwrap();
                     app.handle_key(crossterm::event::KeyEvent::from(KeyCode::Char(c)));
@@ -238,7 +296,7 @@ pub async fn run(
                                     path_buf.clear();
                                     last_key_time = None;
                                     accumulating = false;
-                                    try_share_path(&text, &shares, &event_tx);
+                                    share_dropped_paths(&text, &shares, &event_tx);
                                 }
                             }
                             continue;
@@ -256,6 +314,10 @@ pub async fn run(
                                         last_key_time = None;
                                         app.handle_key(crossterm::event::KeyEvent::from(KeyCode::Char(lone)));
                                         app.handle_key(key);
+                                    } else if c == ' ' && accumulating {
+                                        // Keep spaces between paths in a multi-file drop burst
+                                        path_buf.push(c);
+                                        last_key_time = Some(Instant::now());
                                     } else {
                                         path_buf.push(c);
                                         last_key_time = Some(Instant::now());
@@ -274,7 +336,7 @@ pub async fn run(
                                     path_buf.clear();
                                     last_key_time = None;
                                     accumulating = false;
-                                    try_share_path(&raw, &shares, &event_tx);
+                                    share_dropped_paths(&raw, &shares, &event_tx);
                                 } else {
                                     app.handle_key(key);
                                 }
@@ -299,13 +361,18 @@ pub async fn run(
                             if looks_like_path(&deduped) || looks_like_path(&path_buf) {
                                 accumulating = true;
                             }
+                            // Also stay accumulating when the buffer already has confirmed
+                            // paths separated by spaces (multi-file drop in progress).
+                            if accumulating && path_buf.contains(' ') {
+                                // Keep accumulating — the space is a path separator, not end of input
+                            }
                         }
                     }
                     Event::Paste(text) => {
                         path_buf.clear();
                         last_key_time = None;
                         accumulating = false;
-                        try_share_path(&text, &shares, &event_tx);
+                        share_dropped_paths(&text, &shares, &event_tx);
                     }
                     _ => {}
                 }
@@ -355,7 +422,7 @@ pub async fn run(
 
 #[cfg(test)]
 mod tests {
-    use super::{deduplicate_path, looks_like_path};
+    use super::{deduplicate_path, looks_like_path, split_dropped_paths};
 
     // -----------------------------------------------------------------------
     // deduplicate_path
@@ -454,5 +521,91 @@ mod tests {
         // "C" or "C:" without backslash — not a full path
         assert!(!looks_like_path("C"));
         assert!(!looks_like_path("C:"));
+    }
+
+    // -----------------------------------------------------------------------
+    // split_dropped_paths
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_split_single_unix_path() {
+        assert_eq!(
+            split_dropped_paths("/home/user/file.txt"),
+            vec!["/home/user/file.txt"]
+        );
+    }
+
+    #[test]
+    fn test_split_two_unix_paths() {
+        assert_eq!(
+            split_dropped_paths("/home/user/a.txt /home/user/b.txt"),
+            vec!["/home/user/a.txt", "/home/user/b.txt"]
+        );
+    }
+
+    #[test]
+    fn test_split_three_unix_paths() {
+        assert_eq!(
+            split_dropped_paths("/a/one.txt /b/two.txt /c/three.txt"),
+            vec!["/a/one.txt", "/b/two.txt", "/c/three.txt"]
+        );
+    }
+
+    #[test]
+    fn test_split_quoted_path_with_spaces() {
+        assert_eq!(
+            split_dropped_paths("\"/home/user/my file.txt\""),
+            vec!["/home/user/my file.txt"]
+        );
+    }
+
+    #[test]
+    fn test_split_mixed_quoted_and_unquoted() {
+        assert_eq!(
+            split_dropped_paths("\"/home/user/my file.txt\" /home/user/plain.txt"),
+            vec!["/home/user/my file.txt", "/home/user/plain.txt"]
+        );
+    }
+
+    #[test]
+    fn test_split_single_quoted_paths() {
+        assert_eq!(
+            split_dropped_paths("'/home/user/file one.txt' '/home/user/file two.txt'"),
+            vec!["/home/user/file one.txt", "/home/user/file two.txt"]
+        );
+    }
+
+    #[test]
+    fn test_split_windows_paths() {
+        assert_eq!(
+            split_dropped_paths("C:\\Users\\Tim\\a.txt C:\\Users\\Tim\\b.txt"),
+            vec!["C:\\Users\\Tim\\a.txt", "C:\\Users\\Tim\\b.txt"]
+        );
+    }
+
+    #[test]
+    fn test_split_trailing_whitespace() {
+        assert_eq!(
+            split_dropped_paths("/a/one.txt /b/two.txt  "),
+            vec!["/a/one.txt", "/b/two.txt"]
+        );
+    }
+
+    #[test]
+    fn test_split_newline_separated() {
+        assert_eq!(
+            split_dropped_paths("/a/one.txt\n/b/two.txt"),
+            vec!["/a/one.txt", "/b/two.txt"]
+        );
+    }
+
+    #[test]
+    fn test_split_empty_string() {
+        assert!(split_dropped_paths("").is_empty());
+    }
+
+    #[test]
+    fn test_split_whitespace_only() {
+        assert!(split_dropped_paths("   \t  ").is_empty());
     }
 }
