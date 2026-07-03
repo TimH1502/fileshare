@@ -1,7 +1,7 @@
 use crate::shares::ShareKind;
 use crate::tui::app::{
-    App, DownloadState, Focus, LogKind, SpeedUnit, Theme, UploadState, WebUploadState,
-    ZipConfirmRequest,
+    App, BrowsingFolder, DownloadState, Focus, LogKind, SpeedUnit, Theme, UploadState,
+    WebUploadState, ZipConfirmRequest,
 };
 use qrcode::QrCode;
 use ratatui::{
@@ -64,6 +64,9 @@ pub fn draw(f: &mut Frame, app: &App) {
     }
     if let Some(ref req) = app.zip_confirm {
         draw_zip_confirm_overlay(f, req, th, area);
+    }
+    if let Some(ref b) = app.browsing_folder {
+        draw_browse_folder_overlay(f, b, th, area);
     }
 }
 
@@ -841,6 +844,7 @@ fn draw_status_bar(f: &mut Frame, app: &App, th: &Theme, area: Rect) {
         Focus::PeerFiles => vec![
             Span::styled("[↑↓/jk] navigate  ", Style::default().fg(th.dim)),
             Span::styled("[Enter/d] download  ", Style::default().fg(th.dim)),
+            Span::styled("[b] browse folder  ", Style::default().fg(th.dim)),
             Span::styled("[←] back to peers  ", Style::default().fg(th.dim)),
         ],
         Focus::MyShares => vec![
@@ -884,7 +888,7 @@ fn draw_status_bar(f: &mut Frame, app: &App, th: &Theme, area: Rect) {
 
 fn draw_help_overlay(f: &mut Frame, th: &Theme, area: Rect) {
     let w = 54u16;
-    let h = 24u16;
+    let h = 25u16; // +1 for the new "b: Browse a folder's files" hint
     let x = area.width.saturating_sub(w) / 2;
     let y = area.height.saturating_sub(h) / 2;
     let popup = Rect::new(x, y, w.min(area.width), h.min(area.height));
@@ -937,6 +941,10 @@ fn draw_help_overlay(f: &mut Frame, th: &Theme, area: Rect) {
         )),
         Line::from(Span::styled(
             "  Enter / d         Download selected",
+            Style::default().fg(th.dim),
+        )),
+        Line::from(Span::styled(
+            "  b                 Browse a folder's files (pick one to download)",
             Style::default().fg(th.dim),
         )),
         Line::from(Span::styled(
@@ -1107,8 +1115,8 @@ fn draw_manual_path_overlay(f: &mut Frame, app: &App, th: &Theme, area: Rect) {
 fn draw_zip_confirm_overlay(f: &mut Frame, req: &ZipConfirmRequest, th: &Theme, area: Rect) {
     use crate::shares::human_size;
 
-    let w = 64u16; // was 56 — needs room for the hint + body text
-    let h = 11u16;
+    let w = 66u16;
+    let h = 14u16;
     let x = area.width.saturating_sub(w) / 2;
     let y = area.height.saturating_sub(h) / 2;
     let popup = Rect::new(x, y, w.min(area.width), h.min(area.height));
@@ -1116,7 +1124,7 @@ fn draw_zip_confirm_overlay(f: &mut Frame, req: &ZipConfirmRequest, th: &Theme, 
 
     let size_str = human_size(req.total_size);
     let zip_hint = if req.would_zip {
-        "Recommended: Yes (large folder)"
+        "Recommended: compress (large folder)"
     } else {
         "Optional (small folder)"
     };
@@ -1139,19 +1147,27 @@ fn draw_zip_confirm_overlay(f: &mut Frame, req: &ZipConfirmRequest, th: &Theme, 
         ]),
         Line::from(""),
         Line::from(vec![
-            Span::styled(" Zip before sharing?  ", Style::default().fg(th.dim)),
+            Span::styled(" How should this be shared?  ", Style::default().fg(th.dim)),
             Span::styled(
                 zip_hint,
                 Style::default().fg(if req.would_zip { th.warn } else { th.dim }),
             ),
         ]),
         Line::from(Span::styled(
-            " Zipping saves bandwidth but takes time for large folders.",
+            " Compress: smallest download, slowest to prepare.",
+            Style::default().fg(th.dim),
+        )),
+        Line::from(Span::styled(
+            " Bundle:   fast .zip, no compression — one-click download.",
+            Style::default().fg(th.dim),
+        )),
+        Line::from(Span::styled(
+            " As-is:    no zip at all, downloaded file by file.",
             Style::default().fg(th.dim),
         )),
         Line::from(""),
         Line::from(Span::styled(
-            "  [y] Zip & share    [n] Share as-is    [Esc] Cancel",
+            "  [y] Compress   [f] Fast bundle   [n] As-is   [Esc] Cancel",
             Style::default().fg(th.text),
         )),
     ];
@@ -1168,6 +1184,106 @@ fn draw_zip_confirm_overlay(f: &mut Frame, req: &ZipConfirmRequest, th: &Theme, 
     f.render_widget(
         Paragraph::new(text).block(block).wrap(Wrap { trim: false }),
         popup,
+    );
+}
+
+/// Full-ish overlay showing every file inside a raw folder share, letting the
+/// user pick one to download individually instead of the whole folder.
+fn draw_browse_folder_overlay(f: &mut Frame, b: &BrowsingFolder, th: &Theme, area: Rect) {
+    use crate::shares::human_size;
+
+    let w = (area.width.saturating_sub(6)).min(80);
+    let h = (area.height.saturating_sub(4)).min(24);
+    let x = area.width.saturating_sub(w) / 2;
+    let y = area.height.saturating_sub(h) / 2;
+    let popup = Rect::new(x, y, w, h);
+    f.render_widget(Clear, popup);
+
+    let block = Block::default()
+        .title(Span::styled(
+            format!(" \u{1F50D} {} ", b.folder_name),
+            Style::default().fg(th.accent).add_modifier(Modifier::BOLD),
+        ))
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(th.accent))
+        .style(Style::default().bg(th.overlay_bg));
+
+    let inner = block.inner(popup);
+    f.render_widget(block, popup);
+
+    let layout = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Min(1), Constraint::Length(1)])
+        .split(inner);
+
+    if b.loading {
+        f.render_widget(
+            Paragraph::new(Span::styled(
+                " Loading folder contents\u{2026}",
+                Style::default().fg(th.dim),
+            )),
+            layout[0],
+        );
+    } else if let Some(ref err) = b.error {
+        f.render_widget(
+            Paragraph::new(vec![
+                Line::from(Span::styled(
+                    " Failed to load folder contents:",
+                    Style::default().fg(th.error),
+                )),
+                Line::from(Span::styled(
+                    format!(" {}", err),
+                    Style::default().fg(th.dim),
+                )),
+            ])
+            .wrap(Wrap { trim: false }),
+            layout[0],
+        );
+    } else if b.files.is_empty() {
+        f.render_widget(
+            Paragraph::new(Span::styled(
+                " This folder has no files.",
+                Style::default().fg(th.dim),
+            )),
+            layout[0],
+        );
+    } else {
+        let items: Vec<ListItem> = b
+            .files
+            .iter()
+            .enumerate()
+            .map(|(i, entry)| {
+                let selected = i == b.selected;
+                let style = if selected {
+                    Style::default()
+                        .fg(th.text)
+                        .bg(th.selected_bg)
+                        .add_modifier(Modifier::BOLD)
+                } else {
+                    Style::default().fg(th.text)
+                };
+                let line = format!(
+                    " {:<width$} {:>10}",
+                    entry.path,
+                    human_size(entry.size),
+                    width = (inner.width as usize).saturating_sub(14).max(10),
+                );
+                ListItem::new(Line::from(Span::styled(line, style)))
+            })
+            .collect();
+
+        let mut state = ListState::default();
+        state.select(Some(b.selected));
+        let list = List::new(items);
+        f.render_stateful_widget(list, layout[0], &mut state);
+    }
+
+    f.render_widget(
+        Paragraph::new(Span::styled(
+            "  [\u{2191}\u{2193}] Select   [Enter] Download file   [a] Download all   [Esc] Back",
+            Style::default().fg(th.dim),
+        )),
+        layout[1],
     );
 }
 

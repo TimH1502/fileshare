@@ -157,6 +157,9 @@ fn try_share_path(raw: &str, shares: &ShareRegistry, event_tx: &mpsc::Sender<App
                     folder,
                     done,
                     total,
+                    // Single-file add never actually zips; this field is
+                    // unused in practice for this branch.
+                    mode: crate::shares::ZipMode::Compressed,
                 });
             }) {
                 Ok(item) => {
