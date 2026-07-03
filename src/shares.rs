@@ -18,6 +18,19 @@ pub enum ShareKind {
     ZippedFolder,
 }
 
+/// How a folder should be packaged when shared.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ZipMode {
+    /// Never zip, at any point. Served file-by-file via the folder manifest.
+    NoZip,
+    /// Bundle into a real .zip with no compression (Stored only). Fast —
+    /// essentially disk I/O + CRC32, no deflate — but still gives a single
+    /// one-click downloadable file, same size as the sum of its contents.
+    FastBundle,
+    /// Normal compressed zip (parallel deflate across all cores).
+    Compressed,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SharedItem {
     pub id: String,
@@ -334,7 +347,7 @@ impl ShareRegistry {
         path: PathBuf,
         download_limit: Option<u32>,
         expires_in_mins: Option<u64>,
-        should_zip: bool,
+        zip_mode: ZipMode,
         mut on_zipping: impl FnMut(&str, usize, usize) + Send + 'static,
     ) -> Result<SharedItem> {
         crate::config::debug_log(&format!(
@@ -364,19 +377,33 @@ impl ShareRegistry {
         let expires_at = expires_in_mins.map(|m| Utc::now() + chrono::Duration::minutes(m as i64));
         let (file_count, _, total_size) = analyse_folder_full(&path);
 
-        let (final_path, kind, size, checksum) = if should_zip {
-            on_zipping(&name, 0, file_count);
-            let zip_path = self.zip_cache_dir.join(format!("{}.zip", name));
-            let name_c = name.clone();
-            zip_folder(&path, &zip_path, |done, total| {
-                on_zipping(&name_c, done, total);
-            })?;
-            let size = fs::metadata(&zip_path)?.len();
-            let checksum = compute_checksum_streaming(&zip_path)?;
-            (zip_path, ShareKind::ZippedFolder, size, checksum)
-        } else {
-            let checksum = compute_folder_checksum(&path);
-            (path, ShareKind::Folder, total_size, checksum)
+        let (final_path, kind, size, checksum) = match zip_mode {
+            ZipMode::Compressed => {
+                on_zipping(&name, 0, file_count);
+                let zip_path = self.zip_cache_dir.join(format!("{}.zip", name));
+                let name_c = name.clone();
+                zip_folder(&path, &zip_path, |done, total| {
+                    on_zipping(&name_c, done, total);
+                })?;
+                let size = fs::metadata(&zip_path)?.len();
+                let checksum = compute_checksum_streaming(&zip_path)?;
+                (zip_path, ShareKind::ZippedFolder, size, checksum)
+            }
+            ZipMode::FastBundle => {
+                on_zipping(&name, 0, file_count);
+                let zip_path = self.zip_cache_dir.join(format!("{}.zip", name));
+                let name_c = name.clone();
+                zip_folder_stored_fast(&path, &zip_path, |done, total| {
+                    on_zipping(&name_c, done, total);
+                })?;
+                let size = fs::metadata(&zip_path)?.len();
+                let checksum = compute_checksum_streaming(&zip_path)?;
+                (zip_path, ShareKind::ZippedFolder, size, checksum)
+            }
+            ZipMode::NoZip => {
+                let checksum = compute_folder_checksum(&path);
+                (path, ShareKind::Folder, total_size, checksum)
+            }
         };
 
         let item = SharedItem {
@@ -567,6 +594,71 @@ pub fn analyse_folder_full(path: &Path) -> (usize, usize, u64) {
     (file_count, max_depth, total_size)
 }
 
+/// One entry in a raw folder's manifest: a file's path relative to the
+/// folder root, plus its size in bytes.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FolderManifestEntry {
+    /// Forward-slash-separated path relative to the folder root, e.g. "sub/photo.jpg".
+    pub rel_path: String,
+    pub size: u64,
+}
+
+/// Walk a shared folder and list every file inside it (relative path + size),
+/// for the "download all files, no zipping" flow. Sorted for determinism.
+pub fn list_folder_manifest(path: &Path) -> Vec<FolderManifestEntry> {
+    let mut entries: Vec<FolderManifestEntry> = WalkDir::new(path)
+        .into_iter()
+        .filter_map(|e| e.ok())
+        .filter(|e| e.file_type().is_file())
+        .filter_map(|e| {
+            let rel = e
+                .path()
+                .strip_prefix(path)
+                .ok()?
+                .to_string_lossy()
+                .replace('\\', "/");
+            let size = e.metadata().ok()?.len();
+            Some(FolderManifestEntry {
+                rel_path: rel,
+                size,
+            })
+        })
+        .collect();
+    entries.sort_by(|a, b| a.rel_path.cmp(&b.rel_path));
+    entries
+}
+
+/// Resolve a manifest-provided relative path against a shared folder root,
+/// rejecting anything that could escape the folder (`..` path components,
+/// absolute paths; symlink traversal is caught by the final
+/// canonicalize+prefix check). Returns the canonical absolute path on success.
+pub fn resolve_folder_member(folder_root: &Path, rel_path: &str) -> Option<PathBuf> {
+    if rel_path.is_empty() || rel_path.starts_with('/') {
+        return None;
+    }
+    // Reject backslashes too — we only ever emit forward-slash paths ourselves,
+    // so a backslash indicates a hand-crafted request, not a legitimate client.
+    if rel_path.contains('\\') {
+        return None;
+    }
+    // Reject actual ".." path *components* (not just the substring — a
+    // legitimate filename like "notes..txt" must still be allowed).
+    if rel_path
+        .split('/')
+        .any(|part| part == ".." || part.is_empty())
+    {
+        return None;
+    }
+    let candidate = folder_root.join(rel_path);
+    let canon_root = folder_root.canonicalize().ok()?;
+    let canon_candidate = candidate.canonicalize().ok()?;
+    if canon_candidate.starts_with(&canon_root) && canon_candidate.is_file() {
+        Some(canon_candidate)
+    } else {
+        None
+    }
+}
+
 pub fn folder_size(path: &Path) -> u64 {
     WalkDir::new(path)
         .into_iter()
@@ -575,10 +667,6 @@ pub fn folder_size(path: &Path) -> u64 {
         .filter_map(|e| e.metadata().ok())
         .map(|m| m.len())
         .sum()
-}
-
-pub fn zip_folder_pub(src: &Path, dest: &Path) -> Result<()> {
-    zip_folder(src, dest, |_, _| {})
 }
 
 /// Zip `src` into `dest` using all CPU cores.
@@ -700,6 +788,91 @@ fn zip_folder(src: &Path, dest: &Path, mut on_progress: impl FnMut(usize, usize)
             zip.start_file(&rel_str, stored_opts)?;
         }
         zip.write_all(&data)?;
+        on_progress(files_done + 1, total_files);
+    }
+
+    zip.finish()?;
+    Ok(())
+}
+
+/// "Bundle, don't compress" — pack `src` into a real `.zip` at `dest` using
+/// `Stored` (no compression) for every entry. This is NOT the same as
+/// `zip_folder`: there's no deflate, no rayon, and no reading whole files
+/// into memory. Each file is streamed straight from disk into the zip
+/// envelope through a small buffer, so the cost is essentially disk I/O +
+/// the zip format's mandatory CRC32 pass — both fast enough that even
+/// multi-GB folders finish in a fraction of the time real compression would
+/// take. Use this when the goal is "one downloadable file" rather than
+/// "smaller file".
+///
+/// `on_progress(files_done, total_files)` is called after each file is written.
+pub fn zip_folder_stored_fast(
+    src: &Path,
+    dest: &Path,
+    mut on_progress: impl FnMut(usize, usize),
+) -> Result<()> {
+    use std::io::Write;
+
+    let base = src.parent().unwrap_or(src);
+
+    let all_entries: Vec<_> = WalkDir::new(src)
+        .into_iter()
+        .filter_map(|e| e.ok())
+        .collect();
+
+    let dir_entries: Vec<String> = all_entries
+        .iter()
+        .filter(|e| e.file_type().is_dir())
+        .map(|e| {
+            e.path()
+                .strip_prefix(base)
+                .unwrap_or(e.path())
+                .to_string_lossy()
+                .replace('\\', "/")
+        })
+        .filter(|s| !s.contains("..") && !s.starts_with('/') && !s.is_empty())
+        .collect();
+
+    let file_entries: Vec<(PathBuf, String)> = all_entries
+        .iter()
+        .filter(|e| e.file_type().is_file())
+        .filter_map(|e| {
+            let rel = e.path().strip_prefix(base).ok()?;
+            let rel_str = rel.to_string_lossy().replace('\\', "/");
+            if rel_str.contains("..") || rel_str.starts_with('/') {
+                return None;
+            }
+            Some((e.path().to_path_buf(), rel_str))
+        })
+        .collect();
+
+    let total_files = file_entries.len();
+
+    let file = fs::File::create(dest)?;
+    let mut zip = zip::ZipWriter::new(file);
+
+    let dir_opts: FileOptions<()> = FileOptions::default()
+        .compression_method(zip::CompressionMethod::Stored)
+        .unix_permissions(0o755);
+    for dir_str in &dir_entries {
+        zip.add_directory(dir_str, dir_opts)?;
+    }
+
+    let stored_opts: FileOptions<()> = FileOptions::default()
+        .compression_method(zip::CompressionMethod::Stored)
+        .unix_permissions(0o644);
+
+    let mut buf = [0u8; 256 * 1024];
+    for (files_done, (path, rel_str)) in file_entries.into_iter().enumerate() {
+        zip.start_file(&rel_str, stored_opts)?;
+        let mut reader = BufReader::new(fs::File::open(&path)?);
+        loop {
+            let n = reader.read(&mut buf)?;
+            if n == 0 {
+                break;
+            }
+            zip.write_all(&buf[..n])?;
+        }
         on_progress(files_done + 1, total_files);
     }
 

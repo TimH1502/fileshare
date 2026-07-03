@@ -2,7 +2,7 @@ use anyhow::Result;
 use futures::StreamExt;
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use tokio::io::AsyncWriteExt;
 use tokio::time::Instant;
 
@@ -70,6 +70,31 @@ pub async fn download_file(
     download_dir: &PathBuf,
     progress_tx: tokio::sync::mpsc::Sender<DownloadProgress>,
     retry_tx: tokio::sync::mpsc::Sender<u32>, // sends attempt number on each retry
+    pause_rx: tokio::sync::watch::Receiver<DownloadControl>,
+) -> Result<DownloadResult> {
+    download_url_to_dir(
+        &format!("{}/download/{}", base_url, share_id),
+        share_id,
+        share_name,
+        download_dir,
+        progress_tx,
+        retry_tx,
+        pause_rx,
+    )
+    .await
+}
+
+/// Core single-URL download implementation. `url` is the full request URL;
+/// `tmp_key` is a stable identifier used to name the temp file on disk
+/// (must be unique per concurrent download into the same `download_dir`,
+/// e.g. the share id, or `share_id + "_" + rel_path` for folder members).
+pub(crate) async fn download_url_to_dir(
+    url: &str,
+    tmp_key: &str,
+    dest_name: &str,
+    download_dir: &PathBuf,
+    progress_tx: tokio::sync::mpsc::Sender<DownloadProgress>,
+    retry_tx: tokio::sync::mpsc::Sender<u32>, // sends attempt number on each retry
     mut pause_rx: tokio::sync::watch::Receiver<DownloadControl>,
 ) -> Result<DownloadResult> {
     tokio::fs::create_dir_all(download_dir).await?;
@@ -78,10 +103,10 @@ pub async fn download_file(
         .danger_accept_invalid_certs(true)
         .build()?;
 
-    // Determine filename from a HEAD-like approach: just use the share name for
+    // Determine filename from a HEAD-like approach: just use dest_name for
     // now and correct it from Content-Disposition on the first successful response.
     // We keep a stable temp path so partial data survives retries.
-    let tmp_path = download_dir.join(format!(".dl_tmp_{}", share_id));
+    let tmp_path = download_dir.join(format!(".dl_tmp_{}", sanitize_tmp_key(tmp_key)));
     let mut final_path: Option<PathBuf> = None;
     let mut expected_checksum: Option<String> = None;
     let mut total: u64 = 0;
@@ -96,7 +121,7 @@ pub async fn download_file(
             .unwrap_or(0);
 
         // Build request — add Range header when resuming
-        let mut req = client.get(format!("{}/download/{}", base_url, share_id));
+        let mut req = client.get(url);
         if resume_from > 0 {
             req = req.header(reqwest::header::RANGE, format!("bytes={}-", resume_from));
         }
@@ -117,7 +142,7 @@ pub async fn download_file(
         };
 
         match resp.status() {
-            // 200 OK — server doesn't support range requests (e.g. live-zip folder)
+            // 200 OK — server doesn't support range requests for this resource
             // or this is a fresh start. Truncate any partial file and start over.
             s if s == reqwest::StatusCode::OK => {
                 tokio::fs::remove_file(&tmp_path).await.ok();
@@ -129,7 +154,7 @@ pub async fn download_file(
                 // rename tmp → final and finish
                 let dest = final_path
                     .clone()
-                    .unwrap_or_else(|| download_dir.join(share_name));
+                    .unwrap_or_else(|| download_dir.join(dest_name));
                 tokio::fs::rename(&tmp_path, &dest).await?;
                 return Ok(DownloadResult {
                     path: dest,
@@ -173,7 +198,7 @@ pub async fn download_file(
                 .and_then(|v| v.to_str().ok())
                 .and_then(|s| s.split("filename=").nth(1))
                 .map(|f| f.trim_matches('"').to_string())
-                .unwrap_or_else(|| share_name.to_string());
+                .unwrap_or_else(|| dest_name.to_string());
             final_path = Some(download_dir.join(filename));
         }
 
@@ -306,7 +331,7 @@ pub async fn download_file(
 
             let dest = final_path
                 .clone()
-                .unwrap_or_else(|| download_dir.join(share_name));
+                .unwrap_or_else(|| download_dir.join(dest_name));
             tokio::fs::rename(&tmp_path, &dest).await?;
 
             let checksum_ok = expected_checksum.map(|expected| {
@@ -343,6 +368,225 @@ pub async fn download_file(
         tokio::time::sleep(std::time::Duration::from_millis(wait)).await;
         // Loop back — will read tmp_path size and send Range header
     }
+}
+
+/// Turn an arbitrary tmp-key (e.g. a folder member's relative path, which
+/// may contain '/') into something safe to use as a flat filename component.
+fn sanitize_tmp_key(key: &str) -> String {
+    key.chars()
+        .map(|c| {
+            if c.is_alphanumeric() || c == '-' || c == '_' || c == '.' {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect()
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct FolderManifestEntry {
+    pub path: String,
+    pub size: u64,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct FolderManifestResponse {
+    pub folder_name: String,
+    pub files: Vec<FolderManifestEntry>,
+}
+
+/// Fetch the file listing for a raw (unzipped) folder share.
+pub async fn fetch_folder_manifest(
+    base_url: &str,
+    share_id: &str,
+) -> Result<FolderManifestResponse> {
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(10))
+        .danger_accept_invalid_certs(true)
+        .build()?;
+    let resp = client
+        .get(format!("{}/shares/{}/manifest", base_url, share_id))
+        .send()
+        .await?;
+    if !resp.status().is_success() {
+        anyhow::bail!("Failed to fetch folder manifest: HTTP {}", resp.status());
+    }
+    Ok(resp.json::<FolderManifestResponse>().await?)
+}
+
+/// Aggregate progress across an entire folder download (all files combined).
+pub struct FolderDownloadProgress {
+    pub bytes_downloaded: u64,
+    pub total_bytes: u64,
+    pub speed_bps: f64,
+    pub eta_seconds: f64,
+}
+
+/// Download every file in a raw folder share, one HTTP request per file,
+/// reconstructing the folder's directory structure under
+/// `download_dir/<folder_name>/...`. No zipping happens anywhere in this
+/// path — each file is streamed directly to its final location.
+///
+/// Progress is aggregated across all files into a single stream so callers
+/// (e.g. the TUI) can show one overall progress bar for the whole folder,
+/// the same way a single-file download looks today.
+pub async fn download_folder(
+    base_url: &str,
+    share_id: &str,
+    download_dir: &Path,
+    progress_tx: tokio::sync::mpsc::Sender<FolderDownloadProgress>,
+    retry_tx: tokio::sync::mpsc::Sender<u32>,
+    pause_rx: tokio::sync::watch::Receiver<DownloadControl>,
+) -> Result<DownloadResult> {
+    let manifest = fetch_folder_manifest(base_url, share_id).await?;
+    let folder_root = download_dir.join(&manifest.folder_name);
+    tokio::fs::create_dir_all(&folder_root).await?;
+
+    let files_total = manifest.files.len();
+    let total_bytes: u64 = manifest.files.iter().map(|f| f.size).sum();
+    let mut bytes_done_before_current: u64 = 0;
+
+    let mut smoothed_speed = 0.0f64;
+    let alpha = 0.15;
+    let mut last_time = Instant::now();
+    let mut last_bytes: u64 = 0;
+
+    for (idx, entry) in manifest.files.iter().enumerate() {
+        // Respect cancel before starting each file; pause is handled inside
+        // the per-file download loop via the shared pause_rx.
+        if pause_rx.borrow().clone() == DownloadControl::Cancelled {
+            return Ok(DownloadResult {
+                path: folder_root,
+                checksum_ok: None,
+                cancelled: true,
+            });
+        }
+
+        // Recreate subdirectories for nested files.
+        let dest_path = folder_root.join(&entry.path);
+        if let Some(parent) = dest_path.parent() {
+            tokio::fs::create_dir_all(parent).await?;
+        }
+        let dest_dir = dest_path
+            .parent()
+            .map(|p| p.to_path_buf())
+            .unwrap_or_else(|| folder_root.clone());
+        let dest_name = dest_path
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_else(|| entry.path.clone());
+
+        let url = format!(
+            "{}/download/{}/file?path={}",
+            base_url,
+            share_id,
+            urlencoding_encode(&entry.path)
+        );
+        let tmp_key = format!("{}_{}", share_id, entry.path);
+
+        // Bridge this file's own progress events into the aggregated stream.
+        let (file_progress_tx, mut file_progress_rx) =
+            tokio::sync::mpsc::channel::<DownloadProgress>(8);
+        let agg_tx = progress_tx.clone();
+        let bytes_before = bytes_done_before_current;
+        let bridge = tokio::spawn(async move {
+            while let Some(p) = file_progress_rx.recv().await {
+                let _ = agg_tx.try_send(FolderDownloadProgress {
+                    bytes_downloaded: bytes_before + p.bytes_downloaded,
+                    total_bytes,
+                    speed_bps: p.speed_bps,
+                    eta_seconds: p.eta_seconds,
+                });
+            }
+        });
+
+        let result = download_url_to_dir(
+            &url,
+            &tmp_key,
+            &dest_name,
+            &dest_dir,
+            file_progress_tx,
+            retry_tx.clone(),
+            pause_rx.clone(),
+        )
+        .await;
+        bridge.abort();
+
+        match result {
+            Ok(r) if r.cancelled => {
+                return Ok(DownloadResult {
+                    path: folder_root,
+                    checksum_ok: None,
+                    cancelled: true,
+                });
+            }
+            Ok(_) => {
+                bytes_done_before_current += entry.size;
+                let now = Instant::now();
+                let elapsed = now.duration_since(last_time).as_secs_f64();
+                let new_speed = if elapsed > 0.0 {
+                    (bytes_done_before_current - last_bytes) as f64 / elapsed
+                } else {
+                    0.0
+                };
+                let (eta_seconds, new_smooth) = calc_eta_seconds(
+                    smoothed_speed,
+                    new_speed,
+                    alpha,
+                    total_bytes,
+                    bytes_done_before_current,
+                );
+                smoothed_speed = new_smooth;
+                last_time = now;
+                last_bytes = bytes_done_before_current;
+
+                let _ = progress_tx.try_send(FolderDownloadProgress {
+                    bytes_downloaded: bytes_done_before_current,
+                    total_bytes,
+                    speed_bps: smoothed_speed,
+                    eta_seconds,
+                });
+            }
+            Err(e) => {
+                anyhow::bail!(
+                    "Failed downloading '{}' ({}/{}) from folder '{}': {}",
+                    entry.path,
+                    idx + 1,
+                    files_total,
+                    manifest.folder_name,
+                    e
+                );
+            }
+        }
+    }
+
+    Ok(DownloadResult {
+        path: folder_root,
+        // Raw folders don't have a precomputed per-file checksum server-side
+        // (see server.rs download_folder_file); size-based reconstruction is
+        // the integrity signal here, not a hash comparison.
+        checksum_ok: None,
+        cancelled: false,
+    })
+}
+
+/// Minimal percent-encoding for a URL path segment/query value — avoids
+/// pulling in a dependency just for this. Encodes everything outside the
+/// unreserved set plus '/' (kept literal so nested paths stay readable
+/// server-side; the server's resolver splits on '/' after decoding anyway
+/// since axum decodes the whole query value before we see it).
+pub(crate) fn urlencoding_encode(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for b in s.bytes() {
+        match b {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' | b'/' => {
+                out.push(b as char)
+            }
+            _ => out.push_str(&format!("%{:02X}", b)),
+        }
+    }
+    out
 }
 
 pub fn calc_eta_seconds(
