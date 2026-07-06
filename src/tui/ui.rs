@@ -888,7 +888,7 @@ fn draw_status_bar(f: &mut Frame, app: &App, th: &Theme, area: Rect) {
 
 fn draw_help_overlay(f: &mut Frame, th: &Theme, area: Rect) {
     let w = 54u16;
-    let h = 25u16; // +1 for the new "b: Browse a folder's files" hint
+    let h = 26u16; // +1 for the new "L: Clear activity log" hint
     let x = area.width.saturating_sub(w) / 2;
     let y = area.height.saturating_sub(h) / 2;
     let popup = Rect::new(x, y, w.min(area.width), h.min(area.height));
@@ -1009,6 +1009,10 @@ fn draw_help_overlay(f: &mut Frame, th: &Theme, area: Rect) {
         )),
         Line::from(Span::styled(
             "  t                 Cycle theme (Ocean/Dracula/Nord/Gruvbox/Matrix)",
+            Style::default().fg(th.dim),
+        )),
+        Line::from(Span::styled(
+            "  L                 Clear activity log",
             Style::default().fg(th.dim),
         )),
         Line::from(Span::styled(

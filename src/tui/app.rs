@@ -140,6 +140,14 @@ pub enum AppEvent {
         total: usize,
         mode: crate::shares::ZipMode,
     },
+    /// Live progress tick while computing a file's checksum: file name,
+    /// bytes hashed so far, total bytes. Fired for plain files (no zipping
+    /// involved) so large single-file adds don't look like they've hung.
+    HashProgress {
+        name: String,
+        done: u64,
+        total: u64,
+    },
     /// Manifest fetch for the "browse folder contents" feature succeeded.
     FolderManifestLoaded {
         share_id: String,
@@ -314,6 +322,8 @@ pub struct App {
 
     /// Index of the live zip-progress log entry (updated in-place each tick)
     pub zip_progress_log_idx: Option<usize>,
+    /// Index of the live checksum-progress log entry (updated in-place each tick)
+    pub hash_progress_log_idx: Option<usize>,
 
     /// Whether speeds are shown in bytes (MB/s) or bits (Mb/s); toggled with `u`
     pub speed_unit: SpeedUnit,
@@ -324,6 +334,26 @@ pub struct App {
     pub event_tx: mpsc::Sender<AppEvent>,
 
     pub last_peer_refresh: std::time::Instant,
+}
+
+/// Shorten a name for a single-line log entry so a long filename can't push
+/// the progress bar and percentage off the edge of a narrow terminal.
+/// Keeps a short prefix and suffix (so extensions like ".tar.gz" stay
+/// visible) and drops the middle, e.g. "very_long_name_11…111111.zip".
+/// Operates on chars, not bytes, so it never panics on multi-byte UTF-8.
+fn truncate_middle(name: &str, max_chars: usize) -> String {
+    let chars: Vec<char> = name.chars().collect();
+    if chars.len() <= max_chars {
+        return name.to_string();
+    }
+    // Reserve 1 char for the ellipsis itself; split the rest between
+    // a slightly longer head (more useful for recognizing the file) and tail.
+    let budget = max_chars.saturating_sub(1);
+    let head_len = budget.div_ceil(2);
+    let tail_len = budget - head_len;
+    let head: String = chars[..head_len].iter().collect();
+    let tail: String = chars[chars.len() - tail_len..].iter().collect();
+    format!("{}…{}", head, tail)
 }
 
 impl App {
@@ -363,6 +393,7 @@ impl App {
             zip_confirm: None,
             browsing_folder: None,
             zip_progress_log_idx: None,
+            hash_progress_log_idx: None,
             speed_unit,
             theme_idx,
             event_tx,
@@ -540,6 +571,11 @@ impl App {
                 self.theme_idx = (self.theme_idx + 1) % crate::tui::app::THEMES.len();
                 let name = crate::tui::app::THEMES[self.theme_idx].name;
                 self.log(format!("Theme: {}", name), LogKind::Info);
+            }
+            KeyCode::Char('L') => {
+                self.log.clear();
+                self.zip_progress_log_idx = None;
+                self.hash_progress_log_idx = None;
             }
             KeyCode::Char('m') => match self.focus {
                 Focus::MyShares => {
@@ -1326,6 +1362,7 @@ impl App {
             }
             AppEvent::ShareAdded(item) => {
                 self.zip_progress_log_idx = None;
+                self.hash_progress_log_idx = None;
                 self.log(
                     format!("✓ Shared '{}' ({})", item.name, item.size_human()),
                     LogKind::Success,
@@ -1339,31 +1376,51 @@ impl App {
                 let shares_c = self.shares.clone();
                 tokio::spawn(async move {
                     let etx2 = etx.clone();
+                    let etx3 = etx.clone();
                     let mode_for_progress = zip_mode;
-                    match shares_c.add_with_zip_choice(
-                        path,
-                        None,
-                        None,
-                        zip_mode,
-                        move |folder_name, done, total| {
-                            // Send a live progress event; the TUI updates the same
-                            // log line in-place so it never spams the log.
-                            let folder = folder_name.to_string();
-                            let etx2 = etx2.clone();
-                            // Use try_send to avoid blocking the zip thread
-                            let _ = etx2.try_send(AppEvent::ZipProgress {
-                                folder,
-                                done,
-                                total,
-                                mode: mode_for_progress,
-                            });
-                        },
-                    ) {
-                        Ok(item) => {
+                    // Zipping and checksumming are blocking, CPU/disk-bound work —
+                    // run them on a blocking-pool thread so they never stall an
+                    // async worker thread (which would otherwise freeze input
+                    // handling and progress rendering for other transfers).
+                    let result = tokio::task::spawn_blocking(move || {
+                        shares_c.add_with_zip_choice(
+                            path,
+                            None,
+                            None,
+                            zip_mode,
+                            move |folder_name, done, total| {
+                                // Send a live progress event; the TUI updates the same
+                                // log line in-place so it never spams the log.
+                                let folder = folder_name.to_string();
+                                let etx2 = etx2.clone();
+                                // Use try_send to avoid blocking the zip thread
+                                let _ = etx2.try_send(AppEvent::ZipProgress {
+                                    folder,
+                                    done,
+                                    total,
+                                    mode: mode_for_progress,
+                                });
+                            },
+                            move |name, done, total| {
+                                let name = name.to_string();
+                                let etx3 = etx3.clone();
+                                let _ = etx3.try_send(AppEvent::HashProgress { name, done, total });
+                            },
+                        )
+                    })
+                    .await;
+
+                    match result {
+                        Ok(Ok(item)) => {
                             etx.send(AppEvent::ShareAdded(item)).await.ok();
                         }
-                        Err(e) => {
+                        Ok(Err(e)) => {
                             etx.send(AppEvent::ShareError(e.to_string())).await.ok();
+                        }
+                        Err(e) => {
+                            etx.send(AppEvent::ShareError(format!("Internal error: {}", e)))
+                                .await
+                                .ok();
                         }
                     }
                 });
@@ -1383,9 +1440,10 @@ impl App {
                     crate::shares::ZipMode::FastBundle => "Bundling",
                     _ => "Zipping",
                 };
+                let short_folder = truncate_middle(&folder, 30);
                 let msg = format!(
                     "📦 {} '{}' {} {}/{} files ({}%)",
-                    verb, folder, bar, done, total, pct
+                    verb, short_folder, bar, done, total, pct
                 );
                 match self.zip_progress_log_idx {
                     // Update the existing entry in-place — no new line
@@ -1400,8 +1458,44 @@ impl App {
                     }
                 }
             }
+            AppEvent::HashProgress { name, done, total } => {
+                let pct = if total > 0 {
+                    ((done * 100) / total).min(100)
+                } else {
+                    0
+                };
+                const BAR_W: usize = 20;
+                let filled = if total > 0 {
+                    ((BAR_W as u64 * done) / total).min(BAR_W as u64) as usize
+                } else {
+                    0
+                };
+                let bar = format!("[{}{}]", "█".repeat(filled), "░".repeat(BAR_W - filled),);
+                let short_name = truncate_middle(&name, 30);
+                let msg = format!(
+                    "🔒 Checksumming '{}' {} {} / {} ({}%)",
+                    short_name,
+                    bar,
+                    crate::shares::human_size(done),
+                    crate::shares::human_size(total),
+                    pct
+                );
+                match self.hash_progress_log_idx {
+                    // Update the existing entry in-place — no new line
+                    Some(idx) if idx < self.log.len() => {
+                        self.log[idx].message = msg;
+                        self.log[idx].timestamp = chrono::Local::now();
+                    }
+                    // First progress event — create the entry and remember its index
+                    _ => {
+                        self.log(msg, LogKind::Info);
+                        self.hash_progress_log_idx = Some(self.log.len() - 1);
+                    }
+                }
+            }
             AppEvent::ShareError(e) => {
                 self.zip_progress_log_idx = None;
+                self.hash_progress_log_idx = None;
                 self.log(format!("✗ Share failed: {}", e), LogKind::Warning);
             }
 
