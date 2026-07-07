@@ -1,4 +1,4 @@
-use anyhow::Result;
+use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
 use nanoid::nanoid;
 use serde::{Deserialize, Serialize};
@@ -269,12 +269,15 @@ impl ShareRegistry {
         mut on_hashing: impl FnMut(&str, u64, u64),
     ) -> Result<SharedItem> {
         let name = path.file_name().unwrap().to_string_lossy().to_string();
-        let size = fs::metadata(&path)?.len();
+        let size = fs::metadata(&path)
+            .with_context(|| format!("Failed to read size of '{}'", name))?
+            .len();
         // FIX: streaming checksum — no whole-file load into memory
         let name_c = name.clone();
         let checksum = compute_checksum_streaming_with_progress(&path, |done, total| {
             on_hashing(&name_c, done, total);
-        })?;
+        })
+        .with_context(|| format!("Failed to checksum '{}'", name))?;
         let expires_at = expires_in_mins.map(|m| Utc::now() + chrono::Duration::minutes(m as i64));
 
         let kind = if path.extension().and_then(|e| e.to_str()) == Some("zip") {
@@ -316,9 +319,13 @@ impl ShareRegistry {
             let name_c = name.clone();
             zip_folder(&path, &zip_path, |done, total| {
                 on_zipping(&name_c, done, total);
-            })?;
-            let size = fs::metadata(&zip_path)?.len();
-            let checksum = compute_checksum_streaming(&zip_path)?;
+            })
+            .with_context(|| format!("Failed to create zip archive for '{}'", name))?;
+            let size = fs::metadata(&zip_path)
+                .with_context(|| format!("Failed to read size of zip for '{}'", name))?
+                .len();
+            let checksum = compute_checksum_streaming(&zip_path)
+                .with_context(|| format!("Failed to checksum zip for '{}'", name))?;
             (zip_path, ShareKind::ZippedFolder, size, checksum)
         } else {
             let size = folder_size(&path);
@@ -390,9 +397,13 @@ impl ShareRegistry {
                 let name_c = name.clone();
                 zip_folder(&path, &zip_path, |done, total| {
                     on_zipping(&name_c, done, total);
-                })?;
-                let size = fs::metadata(&zip_path)?.len();
-                let checksum = compute_checksum_streaming(&zip_path)?;
+                })
+                .with_context(|| format!("Failed to create zip archive for '{}'", name))?;
+                let size = fs::metadata(&zip_path)
+                    .with_context(|| format!("Failed to read size of zip for '{}'", name))?
+                    .len();
+                let checksum = compute_checksum_streaming(&zip_path)
+                    .with_context(|| format!("Failed to checksum zip for '{}'", name))?;
                 (zip_path, ShareKind::ZippedFolder, size, checksum)
             }
             ZipMode::FastBundle => {
@@ -401,9 +412,13 @@ impl ShareRegistry {
                 let name_c = name.clone();
                 zip_folder_stored_fast(&path, &zip_path, |done, total| {
                     on_zipping(&name_c, done, total);
-                })?;
-                let size = fs::metadata(&zip_path)?.len();
-                let checksum = compute_checksum_streaming(&zip_path)?;
+                })
+                .with_context(|| format!("Failed to bundle '{}' into a zip", name))?;
+                let size = fs::metadata(&zip_path)
+                    .with_context(|| format!("Failed to read size of zip for '{}'", name))?
+                    .len();
+                let checksum = compute_checksum_streaming(&zip_path)
+                    .with_context(|| format!("Failed to checksum zip for '{}'", name))?;
                 (zip_path, ShareKind::ZippedFolder, size, checksum)
             }
             ZipMode::NoZip => {

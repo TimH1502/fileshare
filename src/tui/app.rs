@@ -133,7 +133,11 @@ pub enum AppEvent {
     ZipConfirmResult(PathBuf, crate::shares::ZipMode),
     ShareAdded(crate::shares::SharedItem),
     ShareError(String),
-    /// Live progress tick while zipping: folder name, files done, total files
+    /// Live progress tick while zipping: folder name, files done, total files.
+    /// Sent with `try_send` (best-effort — a dropped tick just means the
+    /// progress bar skips a frame). Only the terminal `ShareAdded` /
+    /// `ShareError` event is delivery-guaranteed via a blocking `send`, so a
+    /// dropped tick can never leave the log stuck on a stale progress line.
     ZipProgress {
         folder: String,
         done: usize,
@@ -143,6 +147,7 @@ pub enum AppEvent {
     /// Live progress tick while computing a file's checksum: file name,
     /// bytes hashed so far, total bytes. Fired for plain files (no zipping
     /// involved) so large single-file adds don't look like they've hung.
+    /// Same best-effort `try_send` guarantee as `ZipProgress` above.
     HashProgress {
         name: String,
         done: u64,
@@ -1494,9 +1499,28 @@ impl App {
                 }
             }
             AppEvent::ShareError(e) => {
+                // If a zip/hash progress line was still live, turn that exact
+                // line into the failure message in place — the person can
+                // then see which step was running (and how far it got, since
+                // the line keeps its progress text as context) when it broke,
+                // instead of the progress line vanishing and a generic
+                // "Share failed" appearing disconnected from it.
+                let stale_idx = self
+                    .zip_progress_log_idx
+                    .or(self.hash_progress_log_idx)
+                    .filter(|&idx| idx < self.log.len());
                 self.zip_progress_log_idx = None;
                 self.hash_progress_log_idx = None;
-                self.log(format!("✗ Share failed: {}", e), LogKind::Warning);
+                match stale_idx {
+                    Some(idx) => {
+                        self.log[idx].message = format!("✗ {}", e);
+                        self.log[idx].kind = LogKind::Warning;
+                        self.log[idx].timestamp = chrono::Local::now();
+                    }
+                    None => {
+                        self.log(format!("✗ Share failed: {}", e), LogKind::Warning);
+                    }
+                }
             }
 
             AppEvent::ServerEvent(ServerEvent::WebUploadStarted {
