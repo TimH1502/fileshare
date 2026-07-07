@@ -1467,7 +1467,11 @@ impl App {
                 let pct = (done * 100).checked_div(total);
                 const BAR_W: usize = 20;
                 let filled = (BAR_W as u64 * done).checked_div(total);
-                let bar = format!("[{}{}]", "█".repeat(filled.unwrap_or_default() as usize), "░".repeat(BAR_W - filled.unwrap_or_default() as usize),);
+                let bar = format!(
+                    "[{}{}]",
+                    "█".repeat(filled.unwrap_or_default() as usize),
+                    "░".repeat(BAR_W - filled.unwrap_or_default() as usize),
+                );
                 let short_name = truncate_middle(&name, 30);
                 let msg = format!(
                     "🔒 Checksumming '{}' {} {} / {} ({}%)",
