@@ -1369,7 +1369,7 @@ impl App {
                 self.zip_progress_log_idx = None;
                 self.hash_progress_log_idx = None;
                 self.log(
-                    format!("✓ Shared '{}' ({})", item.name, item.size_human()),
+                    format!("Shared '{}' ({})", item.name, item.size_human()),
                     LogKind::Success,
                 );
             }
@@ -1464,18 +1464,10 @@ impl App {
                 }
             }
             AppEvent::HashProgress { name, done, total } => {
-                let pct = if total > 0 {
-                    ((done * 100) / total).min(100)
-                } else {
-                    0
-                };
+                let pct = (done * 100).checked_div(total);
                 const BAR_W: usize = 20;
-                let filled = if total > 0 {
-                    ((BAR_W as u64 * done) / total).min(BAR_W as u64) as usize
-                } else {
-                    0
-                };
-                let bar = format!("[{}{}]", "█".repeat(filled), "░".repeat(BAR_W - filled),);
+                let filled = (BAR_W as u64 * done).checked_div(total);
+                let bar = format!("[{}{}]", "█".repeat(filled.unwrap_or_default() as usize), "░".repeat(BAR_W - filled.unwrap_or_default() as usize),);
                 let short_name = truncate_middle(&name, 30);
                 let msg = format!(
                     "🔒 Checksumming '{}' {} {} / {} ({}%)",
@@ -1483,7 +1475,7 @@ impl App {
                     bar,
                     crate::shares::human_size(done),
                     crate::shares::human_size(total),
-                    pct
+                    pct.unwrap_or(0)
                 );
                 match self.hash_progress_log_idx {
                     // Update the existing entry in-place — no new line

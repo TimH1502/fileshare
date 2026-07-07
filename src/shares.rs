@@ -248,7 +248,13 @@ impl ShareRegistry {
         let item = if path.is_file() {
             self.add_file(path, download_limit, expires_in_mins, &mut on_hashing)?
         } else if path.is_dir() {
-            self.add_folder(path, download_limit, expires_in_mins, &mut on_zipping)?
+            self.add_folder(
+                path,
+                download_limit,
+                expires_in_mins,
+                &mut on_zipping,
+                &mut on_hashing,
+            )?
         } else {
             anyhow::bail!("Path is neither a file nor a directory: {:?}", path)
         };
@@ -306,6 +312,7 @@ impl ShareRegistry {
         download_limit: Option<u32>,
         expires_in_mins: Option<u64>,
         mut on_zipping: impl FnMut(&str, usize, usize),
+        mut on_hashing: impl FnMut(&str, u64, u64),
     ) -> Result<SharedItem> {
         let name = path.file_name().unwrap().to_string_lossy().to_string();
         let expires_at = expires_in_mins.map(|m| Utc::now() + chrono::Duration::minutes(m as i64));
@@ -324,8 +331,11 @@ impl ShareRegistry {
             let size = fs::metadata(&zip_path)
                 .with_context(|| format!("Failed to read size of zip for '{}'", name))?
                 .len();
-            let checksum = compute_checksum_streaming(&zip_path)
-                .with_context(|| format!("Failed to checksum zip for '{}'", name))?;
+            let name_c = name.clone();
+            let checksum = compute_checksum_streaming_with_progress(&zip_path, |done, total| {
+                on_hashing(&name_c, done, total);
+            })
+            .with_context(|| format!("Failed to checksum zip for '{}'", name))?;
             (zip_path, ShareKind::ZippedFolder, size, checksum)
         } else {
             let size = folder_size(&path);
@@ -402,7 +412,11 @@ impl ShareRegistry {
                 let size = fs::metadata(&zip_path)
                     .with_context(|| format!("Failed to read size of zip for '{}'", name))?
                     .len();
-                let checksum = compute_checksum_streaming(&zip_path)
+                let name_c = name.clone();
+                let checksum =
+                    compute_checksum_streaming_with_progress(&zip_path, |done, total| {
+                        on_hashing(&name_c, done, total);
+                    })
                     .with_context(|| format!("Failed to checksum zip for '{}'", name))?;
                 (zip_path, ShareKind::ZippedFolder, size, checksum)
             }
@@ -417,7 +431,11 @@ impl ShareRegistry {
                 let size = fs::metadata(&zip_path)
                     .with_context(|| format!("Failed to read size of zip for '{}'", name))?
                     .len();
-                let checksum = compute_checksum_streaming(&zip_path)
+                let name_c = name.clone();
+                let checksum =
+                    compute_checksum_streaming_with_progress(&zip_path, |done, total| {
+                        on_hashing(&name_c, done, total);
+                    })
                     .with_context(|| format!("Failed to checksum zip for '{}'", name))?;
                 (zip_path, ShareKind::ZippedFolder, size, checksum)
             }
@@ -535,14 +553,9 @@ impl ShareRegistry {
 // Helpers
 // ---------------------------------------------------------------------------
 
-/// Stream a file through SHA256 without loading it all into memory.
-fn compute_checksum_streaming(path: &Path) -> Result<String> {
-    compute_checksum_streaming_with_progress(path, |_, _| {})
-}
-
-/// Same as `compute_checksum_streaming`, but reports (bytes_done, total_bytes)
-/// via `on_progress` as it goes, so callers can surface a progress bar for
-/// large files instead of the TUI appearing to hang while hashing.
+/// Stream a file through SHA256 without loading it all into memory, reporting
+/// (bytes_done, total_bytes) via `on_progress` as it goes — pass a no-op
+/// closure (`|_, _| {}`) if progress isn't needed.
 fn compute_checksum_streaming_with_progress(
     path: &Path,
     mut on_progress: impl FnMut(u64, u64),
