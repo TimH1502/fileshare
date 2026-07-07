@@ -1,5 +1,5 @@
 use axum::{
-    extract::{DefaultBodyLimit, Multipart, Path, State},
+    extract::{ConnectInfo, DefaultBodyLimit, Multipart, Path, Query, State},
     http::{header, HeaderMap, StatusCode},
     response::{IntoResponse, Json, Response},
     routing::{delete, get, post},
@@ -167,7 +167,7 @@ impl futures::Stream for ProgressStream {
 async fn download_file(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
-    axum::extract::ConnectInfo(addr): axum::extract::ConnectInfo<std::net::SocketAddr>,
+    ConnectInfo(addr): ConnectInfo<std::net::SocketAddr>,
     headers: HeaderMap,
 ) -> Response {
     // Parse Range header: "bytes=START-" or "bytes=START-END"
@@ -196,72 +196,60 @@ async fn download_file(
             .ok();
     }
 
-    // FIX: plain unzipped Folder — path is a directory, can't File::open it.
-    // Zip it into a temp file on a blocking thread, then stream and clean up.
+    // Plain raw Folder shares are never zipped — not pre-zipped, not zipped
+    // on demand. They're downloaded file-by-file via the manifest endpoint
+    // (see folder_manifest / download_folder_file below). Hitting the
+    // single-file /download/{id} route for a folder share is a client error.
     if matches!(item.kind, ShareKind::Folder) {
-        let folder_path = item.path.clone();
-        let folder_name = item.name.clone();
-        let checksum = item.checksum.clone();
-
-        let zip_result = tokio::task::spawn_blocking(move || {
-            let tmp = std::env::temp_dir().join(format!("fileshare_tmp_{}.zip", folder_name));
-            crate::shares::zip_folder_pub(&folder_path, &tmp)?;
-            Ok::<_, anyhow::Error>(tmp)
-        })
-        .await;
-
-        return match zip_result {
-            Ok(Ok(tmp_path)) => match tokio::fs::File::open(&tmp_path).await {
-                Ok(file) => {
-                    let size = tokio::fs::metadata(&tmp_path)
-                        .await
-                        .map(|m| m.len())
-                        .unwrap_or(0);
-                    let progress_stream = ProgressStream {
-                        inner: tokio_util::io::ReaderStream::new(file),
-                        event_tx: state.event_tx.clone(),
-                        item_id: item.id.clone(),
-                        bytes_sent: 0,
-                        total: size,
-                        last_report: 0,
-                    };
-                    let body = axum::body::Body::from_stream(progress_stream);
-                    tokio::fs::remove_file(&tmp_path).await.ok();
-                    Response::builder()
-                        .status(StatusCode::OK)
-                        .header(header::CONTENT_TYPE, "application/zip")
-                        .header(
-                            header::CONTENT_DISPOSITION,
-                            format!("attachment; filename=\"{}.zip\"", item.name),
-                        )
-                        .header(header::CONTENT_LENGTH, size)
-                        .header(header::ACCEPT_RANGES, "none")
-                        .header("X-Checksum-SHA256", &checksum)
-                        .body(body)
-                        .unwrap()
-                }
-                Err(_) => {
-                    (StatusCode::INTERNAL_SERVER_ERROR, "Failed to open temp zip").into_response()
-                }
-            },
-            _ => (StatusCode::INTERNAL_SERVER_ERROR, "Failed to zip folder").into_response(),
-        };
+        return (
+            StatusCode::BAD_REQUEST,
+            "This share is a folder \u{2014} fetch /shares/{id}/manifest and download each \
+             file via /download/{id}/file?path=<relative_path> instead of /download/{id}",
+        )
+            .into_response();
     }
 
-    match tokio::fs::File::open(&item.path).await {
-        Ok(mut file) => {
-            let total = item.size;
-            let (content_type, filename) = if matches!(item.kind, ShareKind::ZippedFolder) {
-                ("application/zip".to_string(), format!("{}.zip", item.name))
-            } else {
-                (
-                    mime_guess::from_path(&item.path)
-                        .first_or_octet_stream()
-                        .to_string(),
-                    item.name.clone(),
-                )
-            };
+    let (content_type, filename) = if matches!(item.kind, ShareKind::ZippedFolder) {
+        ("application/zip".to_string(), format!("{}.zip", item.name))
+    } else {
+        (
+            mime_guess::from_path(&item.path)
+                .first_or_octet_stream()
+                .to_string(),
+            item.name.clone(),
+        )
+    };
 
+    stream_file_response(
+        &state,
+        &item.path,
+        item.size,
+        &item.id,
+        &item.checksum,
+        &content_type,
+        &filename,
+        range_start,
+    )
+    .await
+}
+
+/// Stream a single on-disk file as an HTTP response, honouring Range
+/// requests (for pause/resume) and firing the same progress events used
+/// everywhere else in the app. Shared by the single-file `/download/{id}`
+/// route and the per-file `/download/{id}/file` route used for raw folders.
+#[allow(clippy::too_many_arguments)]
+async fn stream_file_response(
+    state: &AppState,
+    path: &std::path::Path,
+    total: u64,
+    item_id: &str,
+    checksum: &str,
+    content_type: &str,
+    filename: &str,
+    range_start: Option<u64>,
+) -> Response {
+    match tokio::fs::File::open(path).await {
+        Ok(mut file) => {
             // Honour Range requests so browser pause/resume works
             let (status, start, content_length) = match range_start {
                 Some(start) if start < total => {
@@ -283,7 +271,7 @@ async fn download_file(
             let progress_stream = ProgressStream {
                 inner: tokio_util::io::ReaderStream::new(file),
                 event_tx: state.event_tx.clone(),
-                item_id: item.id.clone(),
+                item_id: item_id.to_string(),
                 bytes_sent: start, // progress already accounts for resumed offset
                 total,
                 last_report: start,
@@ -299,7 +287,7 @@ async fn download_file(
                 )
                 .header(header::CONTENT_LENGTH, content_length)
                 .header(header::ACCEPT_RANGES, "bytes")
-                .header("X-Checksum-SHA256", &item.checksum);
+                .header("X-Checksum-SHA256", checksum);
             if status == StatusCode::PARTIAL_CONTENT {
                 builder = builder.header(
                     header::CONTENT_RANGE,
@@ -310,6 +298,145 @@ async fn download_file(
         }
         Err(_) => (StatusCode::INTERNAL_SERVER_ERROR, "Failed to open file").into_response(),
     }
+}
+
+#[derive(Serialize)]
+struct ManifestEntryResponse {
+    path: String,
+    size: u64,
+}
+
+#[derive(Serialize)]
+struct ManifestResponse {
+    folder_name: String,
+    files: Vec<ManifestEntryResponse>,
+}
+
+/// GET /shares/{id}/manifest — lists every file inside a raw (unzipped)
+/// folder share, so a client can download them one by one and reconstruct
+/// the folder locally, with no zipping at any point.
+async fn folder_manifest(State(state): State<Arc<AppState>>, Path(id): Path<String>) -> Response {
+    let item = match state.shares.get(&id) {
+        Some(i) if i.is_available() => i,
+        Some(_) => return (StatusCode::GONE, "Share is no longer available").into_response(),
+        None => return (StatusCode::NOT_FOUND, "Share not found").into_response(),
+    };
+
+    if !matches!(item.kind, ShareKind::Folder) {
+        return (
+            StatusCode::BAD_REQUEST,
+            "This share is not a raw folder; use /download/{id} instead",
+        )
+            .into_response();
+    }
+
+    let folder_path = item.path.clone();
+    let entries =
+        tokio::task::spawn_blocking(move || crate::shares::list_folder_manifest(&folder_path))
+            .await
+            .unwrap_or_default();
+
+    Json(ManifestResponse {
+        folder_name: item.name.clone(),
+        files: entries
+            .into_iter()
+            .map(|e| ManifestEntryResponse {
+                path: e.rel_path,
+                size: e.size,
+            })
+            .collect(),
+    })
+    .into_response()
+}
+
+#[derive(serde::Deserialize)]
+struct FolderFileQuery {
+    path: String,
+}
+
+/// GET /download/{id}/file?path=<relative_path> — streams a single file out
+/// of a raw folder share. Supports Range requests exactly like the regular
+/// single-file download route, so pause/resume works the same way.
+async fn download_folder_file(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+    Query(query): Query<FolderFileQuery>,
+    ConnectInfo(addr): ConnectInfo<std::net::SocketAddr>,
+    headers: HeaderMap,
+) -> Response {
+    let range_start: Option<u64> = headers
+        .get(header::RANGE)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|s| s.strip_prefix("bytes="))
+        .and_then(|s| s.split('-').next())
+        .and_then(|s| s.parse().ok());
+
+    let item = match state.shares.get(&id) {
+        Some(i) if i.is_available() => i,
+        Some(_) => return (StatusCode::GONE, "Share is no longer available").into_response(),
+        None => return (StatusCode::NOT_FOUND, "Share not found").into_response(),
+    };
+
+    if !matches!(item.kind, ShareKind::Folder) {
+        return (
+            StatusCode::BAD_REQUEST,
+            "This share is not a raw folder; use /download/{id} instead",
+        )
+            .into_response();
+    }
+
+    let folder_root = item.path.clone();
+    let rel_path = query.path.clone();
+    let resolved = tokio::task::spawn_blocking(move || {
+        crate::shares::resolve_folder_member(&folder_root, &rel_path)
+    })
+    .await
+    .ok()
+    .flatten();
+
+    let file_path = match resolved {
+        Some(p) => p,
+        None => return (StatusCode::NOT_FOUND, "File not found in folder").into_response(),
+    };
+
+    let size = match tokio::fs::metadata(&file_path).await {
+        Ok(m) => m.len(),
+        Err(_) => return (StatusCode::NOT_FOUND, "File not found in folder").into_response(),
+    };
+
+    // Only count/log a fresh download once per file (not range-resume continuations).
+    if range_start.is_none() {
+        state
+            .event_tx
+            .send(ServerEvent::Downloaded {
+                item_name: format!("{}/{}", item.name, query.path),
+                by_addr: addr.ip().to_string(),
+            })
+            .ok();
+    }
+
+    let content_type = mime_guess::from_path(&file_path)
+        .first_or_octet_stream()
+        .to_string();
+    let filename = file_path
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "file".to_string());
+
+    // Per-file checksum isn't precomputed for raw folders (only the cheap
+    // folder-level fingerprint is), so no X-Checksum-SHA256 header here —
+    // the client's overall folder download can verify sizes instead.
+    stream_file_response(
+        &state,
+        &file_path,
+        size,
+        &item.id,
+        "",
+        &content_type,
+        &filename,
+        range_start,
+    )
+    .await
 }
 
 #[derive(Serialize)]
@@ -324,7 +451,7 @@ struct UploadResponse {
 
 async fn upload_file(
     State(state): State<Arc<AppState>>,
-    axum::extract::ConnectInfo(addr): axum::extract::ConnectInfo<std::net::SocketAddr>,
+    ConnectInfo(addr): ConnectInfo<std::net::SocketAddr>,
     headers: HeaderMap,
     mut multipart: Multipart,
 ) -> Response {
@@ -472,7 +599,13 @@ async fn upload_file(
         let shares_c = state.shares.clone();
         let dest_c = dest_path.clone();
         let result = tokio::task::spawn_blocking(move || {
-            shares_c.add(dest_c, None, None, |_name, _done, _total| {})
+            shares_c.add(
+                dest_c,
+                None,
+                None,
+                |_name, _done, _total| {},
+                |_name, _done, _total| {},
+            )
         })
         .await;
 
@@ -565,21 +698,42 @@ async fn serve_browser_ui(State(state): State<Arc<AppState>>) -> axum::response:
             ShareKind::Folder => "📁",
             ShareKind::ZippedFolder => "🗜️",
         };
+        let download_cell = if matches!(item.kind, ShareKind::Folder) {
+            format!(
+                r#"<button onclick="toggleBrowse('{0}', this)" style="background:none;border:1px solid #d29922;color:#d29922;border-radius:4px;padding:2px 8px;cursor:pointer;font-family:monospace;font-size:0.85em;margin-right:4px">&#x1F50D; Browse</button><button onclick="downloadFolder('{0}', '{1}', this)" style="background:none;border:1px solid #58a6ff;color:#58a6ff;border-radius:4px;padding:2px 8px;cursor:pointer;font-family:monospace;font-size:0.85em">&#x2B07; All files</button>"#,
+                html_escape(&item.id),
+                html_escape(&item.name),
+            )
+        } else {
+            format!(
+                r#"<a href="/download/{}" download>Download</a>"#,
+                html_escape(&item.id)
+            )
+        };
+        let browse_row = if matches!(item.kind, ShareKind::Folder) {
+            format!(
+                r#"<tr id="browse-row-{0}" style="display:none"><td colspan="5" style="background:#0d1117;padding:0"><div id="browse-body-{0}" style="padding:8px 16px"></div></td></tr>"#,
+                html_escape(&item.id)
+            )
+        } else {
+            String::new()
+        };
         // FIX: item.id is now escaped even though nanoid produces safe chars
         rows.push_str(&format!(
             r#"<tr>
                 <td>{} {}</td>
                 <td>{}</td>
                 <td>{}</td>
-                <td><a href="/download/{}" download>Download</a></td>
+                <td>{}</td>
                 <td><button onclick="deleteShare('{}', this)" style="background:none;border:1px solid #f85149;color:#f85149;border-radius:4px;padding:2px 8px;cursor:pointer;font-family:monospace;font-size:0.85em">&#x2715; Delete</button></td>
-               </tr>"#,
+               </tr>{}"#,
             kind_icon,
             html_escape(&item.name),
             item.size_human(),
             item.download_count,
+            download_cell,
             html_escape(&item.id),
-            html_escape(&item.id),
+            browse_row,
         ));
     }
 
@@ -682,11 +836,64 @@ async fn serve_browser_ui(State(state): State<Arc<AppState>>) -> axum::response:
           <td>${{iconFor(it.kind)}} ${{esc(it.name)}}</td>
           <td>${{esc(it.size_human)}}</td>
           <td>${{it.download_count}}</td>
-          <td><a href="/download/${{esc(it.id)}}" download>Download</a></td>
+          <td>${{it.kind === 'folder'
+              ? `<button onclick="toggleBrowse('${{esc(it.id)}}', this)" style="background:none;border:1px solid #d29922;color:#d29922;border-radius:4px;padding:2px 8px;cursor:pointer;font-family:monospace;font-size:0.85em;margin-right:4px">🔍 Browse</button><button onclick="downloadFolder('${{esc(it.id)}}', '${{esc(it.name)}}', this)" style="background:none;border:1px solid #58a6ff;color:#58a6ff;border-radius:4px;padding:2px 8px;cursor:pointer;font-family:monospace;font-size:0.85em">⬇ All files</button>`
+              : `<a href="/download/${{esc(it.id)}}" download>Download</a>`}}</td>
           <td><button onclick="deleteShare('${{esc(it.id)}}', this)" style="background:none;border:1px solid #f85149;color:#f85149;border-radius:4px;padding:2px 8px;cursor:pointer;font-family:monospace;font-size:0.85em">✕ Delete</button></td>
-        </tr>`).join('');
+        </tr>
+        ${{it.kind === 'folder' ? `<tr id="browse-row-${{esc(it.id)}}" style="display:none"><td colspan="5" style="background:#0d1117;padding:0"><div id="browse-body-${{esc(it.id)}}" style="padding:8px 16px"></div></td></tr>` : ''}}`).join('');
     }}
     function setStatus(ok, txt) {{ status.className = ok ? 'ok' : 'err'; status.textContent = txt; }}
+
+    function fmtSize(bytes) {{
+      const units = ['B','KB','MB','GB','TB'];
+      let i = 0, n = bytes;
+      while (n >= 1024 && i < units.length - 1) {{ n /= 1024; i++; }}
+      return (i === 0 ? n : n.toFixed(1)) + ' ' + units[i];
+    }}
+
+    // Browsing state survives the 4s poll re-render so an open folder
+    // doesn't snap shut while the user is looking at it.
+    const openFolders = new Set();
+
+    async function toggleBrowse(id, btn) {{
+      const row = document.getElementById('browse-row-' + id);
+      const body = document.getElementById('browse-body-' + id);
+      if (!row) return;
+      const isOpen = row.style.display !== 'none';
+      if (isOpen) {{
+        row.style.display = 'none';
+        openFolders.delete(id);
+        return;
+      }}
+      openFolders.add(id);
+      row.style.display = '';
+      body.innerHTML = '<span style="color:#8b949e">Loading…</span>';
+      await loadBrowseBody(id, body);
+    }}
+
+    async function loadBrowseBody(id, body) {{
+      try {{
+        const r = await fetch('/shares/' + id + '/manifest');
+        if (!r.ok) throw new Error('HTTP ' + r.status);
+        const manifest = await r.json();
+        const files = manifest.files || [];
+        if (!files.length) {{
+          body.innerHTML = '<span style="color:#8b949e">This folder has no files.</span>';
+          return;
+        }}
+        body.innerHTML = `<table style="width:100%;margin:0"><tbody>` + files.map(f => `
+          <tr>
+            <td style="border:none;padding:2px 8px 2px 0;font-size:0.9em">📄 ${{esc(f.path)}}</td>
+            <td style="border:none;padding:2px 8px;font-size:0.9em;color:#8b949e;white-space:nowrap">${{fmtSize(f.size)}}</td>
+            <td style="border:none;padding:2px 0;white-space:nowrap">
+              <a href="/download/${{esc(id)}}/file?path=${{encodeURIComponent(f.path)}}" download style="font-size:0.9em">Download</a>
+            </td>
+          </tr>`).join('') + `</tbody></table>`;
+      }} catch (e) {{
+        body.innerHTML = '<span style="color:#f85149">Failed to load folder contents: ' + esc(e.message) + '</span>';
+      }}
+    }}
 
     async function deleteShare(id, btn) {{
       if (!confirm('Remove this share? The file on disk is NOT deleted.')) return;
@@ -699,6 +906,41 @@ async fn serve_browser_ui(State(state): State<Arc<AppState>>) -> axum::response:
       }} catch {{ btn.textContent = '✕'; btn.disabled = false; }}
     }}
 
+    // Raw folders are never zipped, so there's no single file to download.
+    // Fetch the manifest, then download every file individually (one browser
+    // download per file, landing flat in the user's Downloads folder — the
+    // browser sandbox doesn't let a webpage create a real subfolder there).
+    async function downloadFolder(id, name, btn) {{
+      const origLabel = btn.textContent;
+      btn.disabled = true;
+      try {{
+        const r = await fetch('/shares/' + id + '/manifest');
+        if (!r.ok) throw new Error('HTTP ' + r.status);
+        const manifest = await r.json();
+        const files = manifest.files || [];
+        if (!files.length) {{ alert('This folder has no files.'); return; }}
+        for (let i = 0; i < files.length; i++) {{
+          btn.textContent = `⬇ ${{i + 1}}/${{files.length}}…`;
+          const url = '/download/' + id + '/file?path=' + encodeURIComponent(files[i].path);
+          const a = document.createElement('a');
+          a.href = url;
+          a.download = files[i].path.split('/').pop();
+          document.body.appendChild(a);
+          a.click();
+          a.remove();
+          // Small gap between triggers so the browser doesn't drop rapid-fire
+          // downloads or throw up a "multiple downloads" blocker dialog.
+          await new Promise(res => setTimeout(res, 400));
+        }}
+        btn.textContent = `✓ ${{files.length}} files`;
+      }} catch (e) {{
+        btn.textContent = '✕ failed';
+        alert('Folder download failed: ' + e.message);
+      }} finally {{
+        setTimeout(() => {{ btn.textContent = origLabel; btn.disabled = false; }}, 3000);
+      }}
+    }}
+
     async function poll() {{
       if (document.hidden) return;
       try {{
@@ -706,7 +948,19 @@ async fn serve_browser_ui(State(state): State<Arc<AppState>>) -> axum::response:
         if (!r.ok) throw new Error('HTTP ' + r.status);
         const d = await r.json();
         const j = JSON.stringify(d.items);
-        if (j !== lastJson) {{ lastJson = j; tbody.innerHTML = renderRows(d.items); }}
+        if (j !== lastJson) {{
+          lastJson = j;
+          tbody.innerHTML = renderRows(d.items);
+          // Re-open any folders the user had expanded before this refresh.
+          for (const id of openFolders) {{
+            const row = document.getElementById('browse-row-' + id);
+            const body = document.getElementById('browse-body-' + id);
+            if (row && body) {{
+              row.style.display = '';
+              loadBrowseBody(id, body);
+            }}
+          }}
+        }}
         setStatus(true, 'live · ' + new Date().toLocaleTimeString());
       }} catch {{ setStatus(false, 'offline'); }}
     }}
@@ -826,6 +1080,8 @@ pub fn build_router_with_connect_info(
         .route("/shares", get(list_shares))
         .route("/shares/{id}", delete(delete_share))
         .route("/download/{id}", get(download_file))
+        .route("/download/{id}/file", get(download_folder_file))
+        .route("/shares/{id}/manifest", get(folder_manifest))
         .route(
             "/upload",
             post(upload_file).layer(DefaultBodyLimit::disable()),

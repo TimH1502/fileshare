@@ -75,6 +75,18 @@ pub struct ZipConfirmRequest {
     pub would_zip: bool,
 }
 
+/// State for browsing the contents of a raw folder share (peer files panel).
+#[derive(Debug, Clone)]
+pub struct BrowsingFolder {
+    /// Share id of the folder being browsed.
+    pub share_id: String,
+    pub folder_name: String,
+    pub loading: bool,
+    pub error: Option<String>,
+    pub files: Vec<client::FolderManifestEntry>,
+    pub selected: usize,
+}
+
 /// A file being received from the web UI (browser upload).
 #[derive(Debug, Clone)]
 pub struct WebUploadState {
@@ -118,14 +130,38 @@ pub enum AppEvent {
     ServerEvent(ServerEvent),
     AddShare(PathBuf),
     ZipConfirmNeeded(ZipConfirmRequest),
-    ZipConfirmResult(PathBuf, bool),
+    ZipConfirmResult(PathBuf, crate::shares::ZipMode),
     ShareAdded(crate::shares::SharedItem),
     ShareError(String),
-    /// Live progress tick while zipping: folder name, files done, total files
+    /// Live progress tick while zipping: folder name, files done, total files.
+    /// Sent with `try_send` (best-effort — a dropped tick just means the
+    /// progress bar skips a frame). Only the terminal `ShareAdded` /
+    /// `ShareError` event is delivery-guaranteed via a blocking `send`, so a
+    /// dropped tick can never leave the log stuck on a stale progress line.
     ZipProgress {
         folder: String,
         done: usize,
         total: usize,
+        mode: crate::shares::ZipMode,
+    },
+    /// Live progress tick while computing a file's checksum: file name,
+    /// bytes hashed so far, total bytes. Fired for plain files (no zipping
+    /// involved) so large single-file adds don't look like they've hung.
+    /// Same best-effort `try_send` guarantee as `ZipProgress` above.
+    HashProgress {
+        name: String,
+        done: u64,
+        total: u64,
+    },
+    /// Manifest fetch for the "browse folder contents" feature succeeded.
+    FolderManifestLoaded {
+        share_id: String,
+        files: Vec<client::FolderManifestEntry>,
+    },
+    /// Manifest fetch for the "browse folder contents" feature failed.
+    FolderManifestError {
+        share_id: String,
+        error: String,
     },
 }
 
@@ -284,8 +320,15 @@ pub struct App {
 
     pub zip_confirm: Option<ZipConfirmRequest>,
 
+    /// Set when the user has drilled into a folder's contents in the peer
+    /// files panel. `Some` means we're showing that folder's manifest
+    /// instead of the peer's top-level share list.
+    pub browsing_folder: Option<BrowsingFolder>,
+
     /// Index of the live zip-progress log entry (updated in-place each tick)
     pub zip_progress_log_idx: Option<usize>,
+    /// Index of the live checksum-progress log entry (updated in-place each tick)
+    pub hash_progress_log_idx: Option<usize>,
 
     /// Whether speeds are shown in bytes (MB/s) or bits (Mb/s); toggled with `u`
     pub speed_unit: SpeedUnit,
@@ -296,6 +339,26 @@ pub struct App {
     pub event_tx: mpsc::Sender<AppEvent>,
 
     pub last_peer_refresh: std::time::Instant,
+}
+
+/// Shorten a name for a single-line log entry so a long filename can't push
+/// the progress bar and percentage off the edge of a narrow terminal.
+/// Keeps a short prefix and suffix (so extensions like ".tar.gz" stay
+/// visible) and drops the middle, e.g. "very_long_name_11…111111.zip".
+/// Operates on chars, not bytes, so it never panics on multi-byte UTF-8.
+fn truncate_middle(name: &str, max_chars: usize) -> String {
+    let chars: Vec<char> = name.chars().collect();
+    if chars.len() <= max_chars {
+        return name.to_string();
+    }
+    // Reserve 1 char for the ellipsis itself; split the rest between
+    // a slightly longer head (more useful for recognizing the file) and tail.
+    let budget = max_chars.saturating_sub(1);
+    let head_len = budget.div_ceil(2);
+    let tail_len = budget - head_len;
+    let head: String = chars[..head_len].iter().collect();
+    let tail: String = chars[chars.len() - tail_len..].iter().collect();
+    format!("{}…{}", head, tail)
 }
 
 impl App {
@@ -333,7 +396,9 @@ impl App {
             manual_ip_input: None,
             manual_path_input: None,
             zip_confirm: None,
+            browsing_folder: None,
             zip_progress_log_idx: None,
+            hash_progress_log_idx: None,
             speed_unit,
             theme_idx,
             event_tx,
@@ -387,7 +452,25 @@ impl App {
                     self.zip_confirm = None;
                     let tx = self.event_tx.clone();
                     tokio::spawn(async move {
-                        tx.send(AppEvent::ZipConfirmResult(path, true)).await.ok();
+                        tx.send(AppEvent::ZipConfirmResult(
+                            path,
+                            crate::shares::ZipMode::Compressed,
+                        ))
+                        .await
+                        .ok();
+                    });
+                }
+                KeyCode::Char('f') | KeyCode::Char('F') => {
+                    let path = req.path.clone();
+                    self.zip_confirm = None;
+                    let tx = self.event_tx.clone();
+                    tokio::spawn(async move {
+                        tx.send(AppEvent::ZipConfirmResult(
+                            path,
+                            crate::shares::ZipMode::FastBundle,
+                        ))
+                        .await
+                        .ok();
                     });
                 }
                 KeyCode::Char('n') | KeyCode::Char('N') => {
@@ -395,7 +478,12 @@ impl App {
                     self.zip_confirm = None;
                     let tx = self.event_tx.clone();
                     tokio::spawn(async move {
-                        tx.send(AppEvent::ZipConfirmResult(path, false)).await.ok();
+                        tx.send(AppEvent::ZipConfirmResult(
+                            path,
+                            crate::shares::ZipMode::NoZip,
+                        ))
+                        .await
+                        .ok();
                     });
                 }
                 KeyCode::Esc => {
@@ -403,6 +491,12 @@ impl App {
                 }
                 _ => {}
             }
+            return;
+        }
+
+        // Folder-browse view takes priority over the normal peer-files list
+        if self.browsing_folder.is_some() {
+            self.handle_browsing_folder_key(key);
             return;
         }
 
@@ -483,6 +577,11 @@ impl App {
                 let name = crate::tui::app::THEMES[self.theme_idx].name;
                 self.log(format!("Theme: {}", name), LogKind::Info);
             }
+            KeyCode::Char('L') => {
+                self.log.clear();
+                self.zip_progress_log_idx = None;
+                self.hash_progress_log_idx = None;
+            }
             KeyCode::Char('m') => match self.focus {
                 Focus::MyShares => {
                     self.manual_path_input = Some(String::new());
@@ -555,11 +654,236 @@ impl App {
             KeyCode::Enter | KeyCode::Char('d') => {
                 self.download_selected();
             }
+            KeyCode::Char('b') => {
+                self.browse_selected_folder();
+            }
             KeyCode::Left => {
                 self.focus = Focus::PeerList;
             }
             _ => {}
         }
+    }
+
+    /// Fetch and enter the "browse folder contents" view for the currently
+    /// selected peer share, if it's a raw (unzipped) folder.
+    fn browse_selected_folder(&mut self) {
+        let peer = match self.selected_peer() {
+            Some(p) => p,
+            None => return,
+        };
+        let file = match self.peer_files.get(self.peer_files_state) {
+            Some(f) => f.clone(),
+            None => return,
+        };
+        if file.kind != "folder" {
+            self.log(
+                "Only raw (unzipped) folders can be browsed \u{2014} this share is a single file or a zip",
+                LogKind::Info,
+            );
+            return;
+        }
+
+        self.browsing_folder = Some(BrowsingFolder {
+            share_id: file.id.clone(),
+            folder_name: file.name.clone(),
+            loading: true,
+            error: None,
+            files: vec![],
+            selected: 0,
+        });
+
+        let base_url = peer.http_base();
+        let tx = self.event_tx.clone();
+        let share_id = file.id.clone();
+        tokio::spawn(async move {
+            match client::fetch_folder_manifest(&base_url, &share_id).await {
+                Ok(manifest) => {
+                    tx.send(AppEvent::FolderManifestLoaded {
+                        share_id,
+                        files: manifest.files,
+                    })
+                    .await
+                    .ok();
+                }
+                Err(e) => {
+                    tx.send(AppEvent::FolderManifestError {
+                        share_id,
+                        error: e.to_string(),
+                    })
+                    .await
+                    .ok();
+                }
+            }
+        });
+    }
+
+    fn handle_browsing_folder_key(&mut self, key: crossterm::event::KeyEvent) {
+        use crossterm::event::KeyCode;
+        let file_count = self
+            .browsing_folder
+            .as_ref()
+            .map(|b| b.files.len())
+            .unwrap_or(0);
+        match key.code {
+            KeyCode::Esc | KeyCode::Left => {
+                self.browsing_folder = None;
+            }
+            KeyCode::Down | KeyCode::Char('j') => {
+                if let Some(b) = self.browsing_folder.as_mut() {
+                    if file_count > 0 {
+                        b.selected = (b.selected + 1) % file_count;
+                    }
+                }
+            }
+            KeyCode::Up | KeyCode::Char('k') => {
+                if let Some(b) = self.browsing_folder.as_mut() {
+                    b.selected = b.selected.saturating_sub(1);
+                }
+            }
+            KeyCode::Enter | KeyCode::Char('d') => {
+                self.download_selected_folder_file();
+            }
+            KeyCode::Char('a') => {
+                self.download_selected();
+            }
+            _ => {}
+        }
+    }
+
+    /// Download a single file out of the folder currently being browsed.
+    fn download_selected_folder_file(&mut self) {
+        let (share_id, rel_path, file_size, folder_name) = match self.browsing_folder.as_ref() {
+            Some(b) => match b.files.get(b.selected) {
+                Some(f) => (
+                    b.share_id.clone(),
+                    f.path.clone(),
+                    f.size,
+                    b.folder_name.clone(),
+                ),
+                None => return,
+            },
+            None => return,
+        };
+        let peer = match self.selected_peer() {
+            Some(p) => p,
+            None => return,
+        };
+
+        // Reuse a synthetic id so progress/active-download tracking (keyed by
+        // id) doesn't collide with a concurrent whole-folder download of the
+        // same share.
+        let synthetic_id = format!("{}::{}", share_id, rel_path);
+        if self
+            .active_downloads
+            .iter()
+            .any(|d| d.id == synthetic_id && !d.done)
+        {
+            self.log(
+                format!("'{}' is already downloading", rel_path),
+                LogKind::Info,
+            );
+            return;
+        }
+
+        let dest_name = std::path::Path::new(&rel_path)
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_else(|| rel_path.clone());
+
+        // Watch channel: TUI sends true=paused, false=running — same pattern
+        // as the regular single-file/whole-folder download paths, so pause
+        // and cancel work identically here.
+        let (pause_tx, pause_rx) = tokio::sync::watch::channel(DownloadControl::Running);
+
+        self.active_downloads.push(DownloadState {
+            id: synthetic_id.clone(),
+            name: format!("{}/{}", folder_name, rel_path),
+            bytes_done: 0,
+            total: file_size,
+            speed_bps: 0.0,
+            done: false,
+            cancelled: false,
+            retrying: false,
+            paused: false,
+            done_at: None,
+            pause_tx: Some(pause_tx),
+            eta_seconds: 0.0,
+            last_activity: std::time::Instant::now(),
+        });
+
+        self.log(format!("Downloading '{}'\u{2026}", rel_path), LogKind::Info);
+
+        let base_url = peer.http_base();
+        // Save into <download_dir>/<folder_name>/ to mirror where a full
+        // folder download would have placed this same file.
+        let download_dir = self.config.download_dir.join(&folder_name);
+        let tx = self.event_tx.clone();
+
+        tokio::spawn(async move {
+            let (prog_tx, mut prog_rx) = tokio::sync::mpsc::channel(32);
+            let (retry_tx, mut retry_rx) = tokio::sync::mpsc::channel::<u32>(8);
+            let tx2 = tx.clone();
+            let tx3 = tx.clone();
+            let id2 = synthetic_id.clone();
+            let id3 = synthetic_id.clone();
+
+            tokio::spawn(async move {
+                while let Some(p) = prog_rx.recv().await {
+                    tx2.send(AppEvent::DownloadProgress {
+                        id: id2.clone(),
+                        progress: p,
+                    })
+                    .await
+                    .ok();
+                }
+            });
+            tokio::spawn(async move {
+                while let Some(attempt) = retry_rx.recv().await {
+                    tx3.send(AppEvent::DownloadRetrying {
+                        id: id3.clone(),
+                        attempt,
+                    })
+                    .await
+                    .ok();
+                }
+            });
+
+            let url = format!(
+                "{}/download/{}/file?path={}",
+                base_url,
+                share_id,
+                client::urlencoding_encode(&rel_path)
+            );
+            let result = client::download_url_to_dir(
+                &url,
+                &format!("browse_{}", synthetic_id),
+                &dest_name,
+                &download_dir,
+                prog_tx,
+                retry_tx,
+                pause_rx,
+            )
+            .await;
+
+            match result {
+                Ok(r) => {
+                    tx.send(AppEvent::DownloadDone {
+                        id: synthetic_id,
+                        result: r,
+                    })
+                    .await
+                    .ok();
+                }
+                Err(e) => {
+                    tx.send(AppEvent::DownloadError {
+                        id: synthetic_id,
+                        error: e.to_string(),
+                    })
+                    .await
+                    .ok();
+                }
+            }
+        });
     }
 
     fn handle_my_shares_key(&mut self, key: crossterm::event::KeyEvent) {
@@ -733,6 +1057,7 @@ impl App {
         let download_dir = self.config.download_dir.clone();
         let tx = self.event_tx.clone();
         let file_id = file.id.clone();
+        let is_folder = file.kind == "folder";
 
         tokio::spawn(async move {
             let (prog_tx, mut prog_rx) = tokio::sync::mpsc::channel(32);
@@ -764,17 +1089,54 @@ impl App {
                 }
             });
 
-            match client::download_file(
-                &base_url,
-                &file.id,
-                &file.name,
-                &download_dir,
-                prog_tx,
-                retry_tx,
-                pause_rx,
-            )
-            .await
-            {
+            let result = if is_folder {
+                // Raw folders: no zip, ever. Fetch the manifest and download
+                // every file individually, reconstructing the real folder on
+                // disk. Aggregate per-file progress into the same
+                // DownloadProgress shape the single-file path uses, so the
+                // TUI shows one ordinary progress bar for the whole folder
+                // with no extra UI code needed.
+                let (folder_prog_tx, mut folder_prog_rx) =
+                    tokio::sync::mpsc::channel::<client::FolderDownloadProgress>(32);
+                let bridge_prog_tx = prog_tx.clone();
+                let bridge = tokio::spawn(async move {
+                    while let Some(fp) = folder_prog_rx.recv().await {
+                        let _ = bridge_prog_tx
+                            .send(client::DownloadProgress {
+                                bytes_downloaded: fp.bytes_downloaded,
+                                total_bytes: fp.total_bytes,
+                                speed_bps: fp.speed_bps,
+                                eta_seconds: fp.eta_seconds,
+                            })
+                            .await;
+                    }
+                });
+
+                let r = client::download_folder(
+                    &base_url,
+                    &file.id,
+                    &download_dir,
+                    folder_prog_tx,
+                    retry_tx,
+                    pause_rx,
+                )
+                .await;
+                bridge.abort();
+                r
+            } else {
+                client::download_file(
+                    &base_url,
+                    &file.id,
+                    &file.name,
+                    &download_dir,
+                    prog_tx,
+                    retry_tx,
+                    pause_rx,
+                )
+                .await
+            };
+
+            match result {
                 Ok(result) if result.cancelled => {
                     let _ = result;
                 }
@@ -1005,42 +1367,65 @@ impl App {
             }
             AppEvent::ShareAdded(item) => {
                 self.zip_progress_log_idx = None;
+                self.hash_progress_log_idx = None;
                 self.log(
-                    format!("✓ Shared '{}' ({})", item.name, item.size_human()),
+                    format!("Shared '{}' ({})", item.name, item.size_human()),
                     LogKind::Success,
                 );
             }
             AppEvent::ZipConfirmNeeded(req) => {
                 self.zip_confirm = Some(req);
             }
-            AppEvent::ZipConfirmResult(path, should_zip) => {
+            AppEvent::ZipConfirmResult(path, zip_mode) => {
                 let etx = self.event_tx.clone();
                 let shares_c = self.shares.clone();
                 tokio::spawn(async move {
                     let etx2 = etx.clone();
-                    match shares_c.add_with_zip_choice(
-                        path,
-                        None,
-                        None,
-                        should_zip,
-                        move |folder_name, done, total| {
-                            // Send a live progress event; the TUI updates the same
-                            // log line in-place so it never spams the log.
-                            let folder = folder_name.to_string();
-                            let etx2 = etx2.clone();
-                            // Use try_send to avoid blocking the zip thread
-                            let _ = etx2.try_send(AppEvent::ZipProgress {
-                                folder,
-                                done,
-                                total,
-                            });
-                        },
-                    ) {
-                        Ok(item) => {
+                    let etx3 = etx.clone();
+                    let mode_for_progress = zip_mode;
+                    // Zipping and checksumming are blocking, CPU/disk-bound work —
+                    // run them on a blocking-pool thread so they never stall an
+                    // async worker thread (which would otherwise freeze input
+                    // handling and progress rendering for other transfers).
+                    let result = tokio::task::spawn_blocking(move || {
+                        shares_c.add_with_zip_choice(
+                            path,
+                            None,
+                            None,
+                            zip_mode,
+                            move |folder_name, done, total| {
+                                // Send a live progress event; the TUI updates the same
+                                // log line in-place so it never spams the log.
+                                let folder = folder_name.to_string();
+                                let etx2 = etx2.clone();
+                                // Use try_send to avoid blocking the zip thread
+                                let _ = etx2.try_send(AppEvent::ZipProgress {
+                                    folder,
+                                    done,
+                                    total,
+                                    mode: mode_for_progress,
+                                });
+                            },
+                            move |name, done, total| {
+                                let name = name.to_string();
+                                let etx3 = etx3.clone();
+                                let _ = etx3.try_send(AppEvent::HashProgress { name, done, total });
+                            },
+                        )
+                    })
+                    .await;
+
+                    match result {
+                        Ok(Ok(item)) => {
                             etx.send(AppEvent::ShareAdded(item)).await.ok();
                         }
-                        Err(e) => {
+                        Ok(Err(e)) => {
                             etx.send(AppEvent::ShareError(e.to_string())).await.ok();
+                        }
+                        Err(e) => {
+                            etx.send(AppEvent::ShareError(format!("Internal error: {}", e)))
+                                .await
+                                .ok();
                         }
                     }
                 });
@@ -1049,15 +1434,21 @@ impl App {
                 folder,
                 done,
                 total,
+                mode,
             } => {
                 let pct = (done * 100).checked_div(total).unwrap_or(0);
                 // Build a compact progress bar: [████░░░░] 42/76 (55%)
                 const BAR_W: usize = 20;
                 let filled = (BAR_W * done).checked_div(total).unwrap_or(0);
                 let bar = format!("[{}{}]", "█".repeat(filled), "░".repeat(BAR_W - filled),);
+                let verb = match mode {
+                    crate::shares::ZipMode::FastBundle => "Bundling",
+                    _ => "Zipping",
+                };
+                let short_folder = truncate_middle(&folder, 30);
                 let msg = format!(
-                    "📦 Zipping '{}' {} {}/{} files ({}%)",
-                    folder, bar, done, total, pct
+                    "📦 {} '{}' {} {}/{} files ({}%)",
+                    verb, short_folder, bar, done, total, pct
                 );
                 match self.zip_progress_log_idx {
                     // Update the existing entry in-place — no new line
@@ -1072,9 +1463,60 @@ impl App {
                     }
                 }
             }
+            AppEvent::HashProgress { name, done, total } => {
+                let pct = (done * 100).checked_div(total);
+                const BAR_W: usize = 20;
+                let filled = (BAR_W as u64 * done).checked_div(total);
+                let bar = format!(
+                    "[{}{}]",
+                    "█".repeat(filled.unwrap_or_default() as usize),
+                    "░".repeat(BAR_W - filled.unwrap_or_default() as usize),
+                );
+                let short_name = truncate_middle(&name, 30);
+                let msg = format!(
+                    "🔒 Checksumming '{}' {} {} / {} ({}%)",
+                    short_name,
+                    bar,
+                    crate::shares::human_size(done),
+                    crate::shares::human_size(total),
+                    pct.unwrap_or(0)
+                );
+                match self.hash_progress_log_idx {
+                    // Update the existing entry in-place — no new line
+                    Some(idx) if idx < self.log.len() => {
+                        self.log[idx].message = msg;
+                        self.log[idx].timestamp = chrono::Local::now();
+                    }
+                    // First progress event — create the entry and remember its index
+                    _ => {
+                        self.log(msg, LogKind::Info);
+                        self.hash_progress_log_idx = Some(self.log.len() - 1);
+                    }
+                }
+            }
             AppEvent::ShareError(e) => {
+                // If a zip/hash progress line was still live, turn that exact
+                // line into the failure message in place — the person can
+                // then see which step was running (and how far it got, since
+                // the line keeps its progress text as context) when it broke,
+                // instead of the progress line vanishing and a generic
+                // "Share failed" appearing disconnected from it.
+                let stale_idx = self
+                    .zip_progress_log_idx
+                    .or(self.hash_progress_log_idx)
+                    .filter(|&idx| idx < self.log.len());
                 self.zip_progress_log_idx = None;
-                self.log(format!("✗ Share failed: {}", e), LogKind::Warning);
+                self.hash_progress_log_idx = None;
+                match stale_idx {
+                    Some(idx) => {
+                        self.log[idx].message = format!("✗ {}", e);
+                        self.log[idx].kind = LogKind::Warning;
+                        self.log[idx].timestamp = chrono::Local::now();
+                    }
+                    None => {
+                        self.log(format!("✗ Share failed: {}", e), LogKind::Warning);
+                    }
+                }
             }
 
             AppEvent::ServerEvent(ServerEvent::WebUploadStarted {
@@ -1246,6 +1688,23 @@ impl App {
                     .retain(|u| u.done_at.map(|t| t.elapsed().as_secs() < 3).unwrap_or(true));
                 self.web_uploads
                     .retain(|w| w.done_at.map(|t| t.elapsed().as_secs() < 3).unwrap_or(true));
+            }
+            AppEvent::FolderManifestLoaded { share_id, files } => {
+                if let Some(b) = self.browsing_folder.as_mut() {
+                    if b.share_id == share_id {
+                        b.loading = false;
+                        b.files = files;
+                        b.selected = 0;
+                    }
+                }
+            }
+            AppEvent::FolderManifestError { share_id, error } => {
+                if let Some(b) = self.browsing_folder.as_mut() {
+                    if b.share_id == share_id {
+                        b.loading = false;
+                        b.error = Some(error);
+                    }
+                }
             }
             _ => {}
         }

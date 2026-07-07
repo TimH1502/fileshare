@@ -13,7 +13,7 @@ A fast, zero-config local network file sharing CLI. Share files and folders with
 - **Manual peer** — add a peer by IP if mDNS is blocked (`m` in the Peers panel), remove with `x`
 - **Drag & drop** — drag a file or folder into the terminal to share it instantly (Windows, Linux, macOS)
 - **Manual path entry** — press `m` in the My Shares panel to type a path directly
-- **Folder zip dialog** — when sharing a folder, a popup shows size and file count and asks whether to zip; zipping saves bandwidth for large folders
+- **Folder zip dialog** — when sharing a folder, a popup shows size and file count and asks whether to zip; zipping saves bandwidth for large folders, "share as-is" never zips at all — the folder is downloaded file-by-file instead
 - **Parallel zipping** — folders are compressed using all CPU cores (rayon + zlib-ng), reaching speeds comparable to 7-Zip; a live progress bar in the log updates in-place without spamming new lines
 - **HTTPS browser UI** — open `https://<your-ip>:7777` from any device on the network; plain HTTP on port 7778 redirects automatically to HTTPS
 - **Web upload** — drag files onto the browser UI or use the file picker to upload directly to the sharing host
@@ -118,6 +118,7 @@ Unix:     /home/tim/downloads/report.pdf
 ║ Zip before sharing?  Recommended: Yes (large folder) ║
 ║ Zipping saves bandwidth but takes time for large     ║
 ║ folders.                                             ║
+║ As-is: files stay unzipped, downloaded one by one.   ║
 ║                                                      ║
 ║  [y] Zip & share    [n] Share as-is    [Esc] Cancel  ║
 ╚══════════════════════════════════════════════════════╝
@@ -132,6 +133,8 @@ While zipping, the log panel shows a live progress bar that refreshes in-place:
 ```
 
 Zipped folders appear in your shares list with a 📦 icon.
+
+**Share as-is (no zipping, ever):** Choosing "Share as-is" never zips the folder — not up front, and not when someone downloads it. It still shows as a single 📁 entry in the shares list and in peers' file lists (not as 847 separate rows), but internally the client fetches a manifest of every file in the folder and downloads them one at a time, recreating the folder on disk under the recipient's download directory. This is meant for folders with a handful of large files rather than folders with thousands of small ones — each file is a separate HTTP request, so very large file counts add overhead that zipping (or pre-zipping) avoids. In a browser, each file lands as its own download in the Downloads folder (browsers can't create a real subfolder from a webpage), whereas the native TUI/CLI client reconstructs the actual folder structure.
 
 ### Browser UI
 

@@ -149,21 +149,46 @@ fn try_share_path(raw: &str, shares: &ShareRegistry, event_tx: &mpsc::Sender<App
             .await
             .ok();
         } else {
-            // Plain file — share immediately
+            // Plain file — share immediately. Hashing a large file can take
+            // a while, so run it on a blocking-pool thread (it does
+            // synchronous disk I/O) and report live progress back to the log.
             let etx2 = etx.clone();
-            match shares_c.add(path, None, None, move |folder_name, done, total| {
-                let folder = folder_name.to_string();
-                let _ = etx2.try_send(AppEvent::ZipProgress {
-                    folder,
-                    done,
-                    total,
-                });
-            }) {
-                Ok(item) => {
+            let etx3 = etx.clone();
+            let result = tokio::task::spawn_blocking(move || {
+                shares_c.add(
+                    path,
+                    None,
+                    None,
+                    move |folder_name, done, total| {
+                        let folder = folder_name.to_string();
+                        let _ = etx2.try_send(AppEvent::ZipProgress {
+                            folder,
+                            done,
+                            total,
+                            // Single-file add never actually zips; this field is
+                            // unused in practice for this branch.
+                            mode: crate::shares::ZipMode::Compressed,
+                        });
+                    },
+                    move |name, done, total| {
+                        let name = name.to_string();
+                        let _ = etx3.try_send(AppEvent::HashProgress { name, done, total });
+                    },
+                )
+            })
+            .await;
+
+            match result {
+                Ok(Ok(item)) => {
                     etx.send(AppEvent::ShareAdded(item)).await.ok();
                 }
-                Err(e) => {
+                Ok(Err(e)) => {
                     etx.send(AppEvent::ShareError(e.to_string())).await.ok();
+                }
+                Err(e) => {
+                    etx.send(AppEvent::ShareError(format!("Internal error: {}", e)))
+                        .await
+                        .ok();
                 }
             }
         }
