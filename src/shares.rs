@@ -1,4 +1,4 @@
-use anyhow::Result;
+use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
 use nanoid::nanoid;
 use serde::{Deserialize, Serialize};
@@ -238,16 +238,23 @@ impl ShareRegistry {
         path: PathBuf,
         download_limit: Option<u32>,
         expires_in_mins: Option<u64>,
-        on_zipping: impl FnMut(&str, usize, usize) + Send + 'static,
+        mut on_zipping: impl FnMut(&str, usize, usize) + Send + 'static,
+        mut on_hashing: impl FnMut(&str, u64, u64) + Send + 'static,
     ) -> Result<SharedItem> {
         crate::config::debug_log(&format!("shares::add() input path = {:?}", path));
         let canon = path.canonicalize();
         crate::config::debug_log(&format!("shares::add() canonicalize = {:?}", canon));
         let path = canon?;
         let item = if path.is_file() {
-            self.add_file(path, download_limit, expires_in_mins)?
+            self.add_file(path, download_limit, expires_in_mins, &mut on_hashing)?
         } else if path.is_dir() {
-            self.add_folder(path, download_limit, expires_in_mins, on_zipping)?
+            self.add_folder(
+                path,
+                download_limit,
+                expires_in_mins,
+                &mut on_zipping,
+                &mut on_hashing,
+            )?
         } else {
             anyhow::bail!("Path is neither a file nor a directory: {:?}", path)
         };
@@ -265,11 +272,18 @@ impl ShareRegistry {
         path: PathBuf,
         download_limit: Option<u32>,
         expires_in_mins: Option<u64>,
+        mut on_hashing: impl FnMut(&str, u64, u64),
     ) -> Result<SharedItem> {
         let name = path.file_name().unwrap().to_string_lossy().to_string();
-        let size = fs::metadata(&path)?.len();
+        let size = fs::metadata(&path)
+            .with_context(|| format!("Failed to read size of '{}'", name))?
+            .len();
         // FIX: streaming checksum — no whole-file load into memory
-        let checksum = compute_checksum_streaming(&path)?;
+        let name_c = name.clone();
+        let checksum = compute_checksum_streaming_with_progress(&path, |done, total| {
+            on_hashing(&name_c, done, total);
+        })
+        .with_context(|| format!("Failed to checksum '{}'", name))?;
         let expires_at = expires_in_mins.map(|m| Utc::now() + chrono::Duration::minutes(m as i64));
 
         let kind = if path.extension().and_then(|e| e.to_str()) == Some("zip") {
@@ -298,6 +312,7 @@ impl ShareRegistry {
         download_limit: Option<u32>,
         expires_in_mins: Option<u64>,
         mut on_zipping: impl FnMut(&str, usize, usize),
+        mut on_hashing: impl FnMut(&str, u64, u64),
     ) -> Result<SharedItem> {
         let name = path.file_name().unwrap().to_string_lossy().to_string();
         let expires_at = expires_in_mins.map(|m| Utc::now() + chrono::Duration::minutes(m as i64));
@@ -311,9 +326,16 @@ impl ShareRegistry {
             let name_c = name.clone();
             zip_folder(&path, &zip_path, |done, total| {
                 on_zipping(&name_c, done, total);
-            })?;
-            let size = fs::metadata(&zip_path)?.len();
-            let checksum = compute_checksum_streaming(&zip_path)?;
+            })
+            .with_context(|| format!("Failed to create zip archive for '{}'", name))?;
+            let size = fs::metadata(&zip_path)
+                .with_context(|| format!("Failed to read size of zip for '{}'", name))?
+                .len();
+            let name_c = name.clone();
+            let checksum = compute_checksum_streaming_with_progress(&zip_path, |done, total| {
+                on_hashing(&name_c, done, total);
+            })
+            .with_context(|| format!("Failed to checksum zip for '{}'", name))?;
             (zip_path, ShareKind::ZippedFolder, size, checksum)
         } else {
             let size = folder_size(&path);
@@ -349,6 +371,7 @@ impl ShareRegistry {
         expires_in_mins: Option<u64>,
         zip_mode: ZipMode,
         mut on_zipping: impl FnMut(&str, usize, usize) + Send + 'static,
+        mut on_hashing: impl FnMut(&str, u64, u64) + Send + 'static,
     ) -> Result<SharedItem> {
         crate::config::debug_log(&format!(
             "shares::add_with_zip_choice() input path = {:?}",
@@ -361,7 +384,7 @@ impl ShareRegistry {
         ));
         let path = canon?;
         if path.is_file() {
-            let item = self.add_file(path, download_limit, expires_in_mins)?;
+            let item = self.add_file(path, download_limit, expires_in_mins, &mut on_hashing)?;
             let mut store = self.inner.write().unwrap();
             store.insert(item.id.clone(), item.clone());
             drop(store);
@@ -384,9 +407,17 @@ impl ShareRegistry {
                 let name_c = name.clone();
                 zip_folder(&path, &zip_path, |done, total| {
                     on_zipping(&name_c, done, total);
-                })?;
-                let size = fs::metadata(&zip_path)?.len();
-                let checksum = compute_checksum_streaming(&zip_path)?;
+                })
+                .with_context(|| format!("Failed to create zip archive for '{}'", name))?;
+                let size = fs::metadata(&zip_path)
+                    .with_context(|| format!("Failed to read size of zip for '{}'", name))?
+                    .len();
+                let name_c = name.clone();
+                let checksum =
+                    compute_checksum_streaming_with_progress(&zip_path, |done, total| {
+                        on_hashing(&name_c, done, total);
+                    })
+                    .with_context(|| format!("Failed to checksum zip for '{}'", name))?;
                 (zip_path, ShareKind::ZippedFolder, size, checksum)
             }
             ZipMode::FastBundle => {
@@ -395,9 +426,17 @@ impl ShareRegistry {
                 let name_c = name.clone();
                 zip_folder_stored_fast(&path, &zip_path, |done, total| {
                     on_zipping(&name_c, done, total);
-                })?;
-                let size = fs::metadata(&zip_path)?.len();
-                let checksum = compute_checksum_streaming(&zip_path)?;
+                })
+                .with_context(|| format!("Failed to bundle '{}' into a zip", name))?;
+                let size = fs::metadata(&zip_path)
+                    .with_context(|| format!("Failed to read size of zip for '{}'", name))?
+                    .len();
+                let name_c = name.clone();
+                let checksum =
+                    compute_checksum_streaming_with_progress(&zip_path, |done, total| {
+                        on_hashing(&name_c, done, total);
+                    })
+                    .with_context(|| format!("Failed to checksum zip for '{}'", name))?;
                 (zip_path, ShareKind::ZippedFolder, size, checksum)
             }
             ZipMode::NoZip => {
@@ -514,19 +553,36 @@ impl ShareRegistry {
 // Helpers
 // ---------------------------------------------------------------------------
 
-/// Stream a file through SHA256 without loading it all into memory.
-fn compute_checksum_streaming(path: &Path) -> Result<String> {
+/// Stream a file through SHA256 without loading it all into memory, reporting
+/// (bytes_done, total_bytes) via `on_progress` as it goes — pass a no-op
+/// closure (`|_, _| {}`) if progress isn't needed.
+fn compute_checksum_streaming_with_progress(
+    path: &Path,
+    mut on_progress: impl FnMut(u64, u64),
+) -> Result<String> {
     let file = fs::File::open(path)?;
+    let total = file.metadata().map(|m| m.len()).unwrap_or(0);
     let mut reader = BufReader::with_capacity(1 << 20, file); // 1 MiB buffer
     let mut hasher = Sha256::new();
     let mut buf = vec![0u8; 1 << 20];
+    let mut done: u64 = 0;
+    let mut last_report = std::time::Instant::now();
+    on_progress(0, total);
     loop {
         let n = reader.read(&mut buf)?;
         if n == 0 {
             break;
         }
         hasher.update(&buf[..n]);
+        done += n as u64;
+        // Throttle to ~10 updates/sec so we don't flood the event channel
+        // on fast local disks while still feeling live on slow/network drives.
+        if last_report.elapsed().as_millis() >= 100 {
+            on_progress(done, total);
+            last_report = std::time::Instant::now();
+        }
     }
+    on_progress(done, total);
     Ok(hex::encode(hasher.finalize()))
 }
 

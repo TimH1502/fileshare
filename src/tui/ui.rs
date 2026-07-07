@@ -886,144 +886,233 @@ fn draw_status_bar(f: &mut Frame, app: &App, th: &Theme, area: Rect) {
     f.render_widget(bar, area);
 }
 
+/// One row of the keyboard-shortcuts help popup.
+enum HelpRow {
+    /// Section title, e.g. "Navigation" — bold, themed accent/text color.
+    Heading(&'static str),
+    Section(&'static str),
+    /// A `key -> description` pair, rendered as a fixed-width key column
+    /// followed by a word-wrapped description. Long descriptions wrap onto
+    /// a new line indented to line up under the description column instead
+    /// of falling back to the left edge.
+    Shortcut(&'static str, &'static str),
+    /// Plain note line, no key column (e.g. "Multiple files can download…").
+    Note(&'static str),
+    Blank,
+}
+
+/// Width reserved for the key column (before the description starts),
+/// not counting the 2-space left margin.
+const HELP_KEY_COL: usize = 20;
+
 fn draw_help_overlay(f: &mut Frame, th: &Theme, area: Rect) {
-    let w = 54u16;
-    let h = 25u16; // +1 for the new "b: Browse a folder's files" hint
+    use HelpRow::*;
+    let rows: Vec<HelpRow> = vec![
+        Heading(" Keyboard Shortcuts"),
+        Blank,
+        Section(" Navigation"),
+        Shortcut("Tab / Shift+Tab", "Switch panel"),
+        Shortcut("↑/↓  or  j/k", "Move selection"),
+        Shortcut("←/→", "Switch panels"),
+        Blank,
+        Section(" Peers"),
+        Shortcut("m", "Add peer manually"),
+        Shortcut("x / Del", "Remove manual peer"),
+        Shortcut("Enter", "Browse peer's files"),
+        Blank,
+        Section(" Downloads"),
+        Shortcut("Enter / d", "Download selected"),
+        Shortcut("b", "Browse a folder's files (pick one to download)"),
+        Note("Multiple files can download simultaneously"),
+        Note("SHA256 is verified automatically on completion"),
+        Blank,
+        Section(" Sharing"),
+        Shortcut("x / Del", "Remove your share"),
+        Shortcut("Drag & drop file", "Share it instantly"),
+        Shortcut("Drag & drop folder", "→ zip dialog"),
+        Shortcut("m (in My Shares)", "Type a path manually"),
+        Blank,
+        Section(" Transfers panel (Tab to focus)"),
+        Shortcut("↕ / j/k", "Select download"),
+        Shortcut("p / Space", "Pause / resume"),
+        Shortcut("c / Delete", "Cancel download"),
+        Blank,
+        Shortcut("?", "Toggle this help"),
+        Shortcut("r", "Show QR code for web UI"),
+        Shortcut("u", "Toggle speed unit (MB/s ↔ Mb/s)"),
+        Shortcut("t", "Cycle theme"),
+        Note("(Ocean, Dracula, Nord, Gruvbox, Matrix)"),
+        Shortcut("L", "Clear activity log"),
+        Shortcut("q / Ctrl+C", "Quit"),
+    ];
+
+    // Inner content width (popup width minus the 2 border columns).
+    let w = 58u16;
+    let inner_w = (w as usize).saturating_sub(2);
+
+    // Each rendered line, tagged with whether it's a droppable blank
+    // spacer — lets us reclaim vertical space on short terminals without
+    // just cutting content off the bottom.
+    let mut lines: Vec<(Line, bool)> = Vec::with_capacity(rows.len() + 4);
+    for row in &rows {
+        match row {
+            Heading(s) => lines.push((
+                Line::from(Span::styled(
+                    *s,
+                    Style::default().fg(th.accent).add_modifier(Modifier::BOLD),
+                )),
+                false,
+            )),
+            Section(s) => lines.push((
+                Line::from(Span::styled(
+                    *s,
+                    Style::default().fg(th.text).add_modifier(Modifier::BOLD),
+                )),
+                false,
+            )),
+            Note(s) => {
+                // Indent to match the key column so it lines up under the
+                // description text above it, e.g. the theme-name list under
+                // "t   Cycle theme". Word-wrap it too — notes are free text
+                // and can easily be longer than the popup is wide.
+                let indent = " ".repeat(2 + HELP_KEY_COL);
+                let note_width = inner_w.saturating_sub(indent.chars().count()).max(10);
+                for wrapped_line in wrap_words(s, note_width) {
+                    lines.push((
+                        Line::from(Span::styled(
+                            format!("{}{}", indent, wrapped_line),
+                            Style::default().fg(th.dim),
+                        )),
+                        false,
+                    ));
+                }
+            }
+            Blank => lines.push((Line::from(""), true)),
+            Shortcut(key, desc) => {
+                for line in wrap_shortcut(key, desc, inner_w) {
+                    lines.push((
+                        Line::from(Span::styled(line, Style::default().fg(th.dim))),
+                        false,
+                    ));
+                }
+            }
+        }
+    }
+
+    // Fit the content to the terminal: first drop blank spacer lines
+    // (cheapest way to reclaim rows), then, if it's still too tall for
+    // even the shortest reasonable popup, truncate with a visible hint
+    // rather than silently cutting rows off the bottom.
+    let max_content_rows = area.height.saturating_sub(2) as usize; // minus borders
+    if lines.len() > max_content_rows {
+        lines.retain(|(_, is_blank)| !is_blank);
+    }
+    if lines.len() > max_content_rows {
+        let keep = max_content_rows.saturating_sub(1); // leave room for the hint line
+        lines.truncate(keep);
+        lines.push((
+            Line::from(Span::styled(
+                " … resize terminal to see more",
+                Style::default().fg(th.warn),
+            )),
+            false,
+        ));
+    }
+    let text: Vec<Line> = lines.into_iter().map(|(line, _)| line).collect();
+
+    let h = (text.len() as u16 + 2).min(area.height); // +2 for top/bottom border
     let x = area.width.saturating_sub(w) / 2;
     let y = area.height.saturating_sub(h) / 2;
-    let popup = Rect::new(x, y, w.min(area.width), h.min(area.height));
+    let popup = Rect::new(x, y, w.min(area.width), h);
 
     f.render_widget(Clear, popup);
-
-    let text = vec![
-        Line::from(Span::styled(
-            " Keyboard Shortcuts",
-            Style::default().fg(th.accent).add_modifier(Modifier::BOLD),
-        )),
-        Line::from(""),
-        Line::from(Span::styled(
-            " Navigation",
-            Style::default().fg(th.text).add_modifier(Modifier::BOLD),
-        )),
-        Line::from(Span::styled(
-            "  Tab / Shift+Tab   Switch panel",
-            Style::default().fg(th.dim),
-        )),
-        Line::from(Span::styled(
-            "  ↑/↓  or  j/k      Move selection",
-            Style::default().fg(th.dim),
-        )),
-        Line::from(Span::styled(
-            "  ←/→               Switch panels",
-            Style::default().fg(th.dim),
-        )),
-        Line::from(""),
-        Line::from(Span::styled(
-            " Peers",
-            Style::default().fg(th.text).add_modifier(Modifier::BOLD),
-        )),
-        Line::from(Span::styled(
-            "  m                 Add peer manually",
-            Style::default().fg(th.dim),
-        )),
-        Line::from(Span::styled(
-            "  x / Del           Remove manual peer",
-            Style::default().fg(th.dim),
-        )),
-        Line::from(Span::styled(
-            "  Enter             Browse peer's files",
-            Style::default().fg(th.dim),
-        )),
-        Line::from(""),
-        Line::from(Span::styled(
-            " Downloads",
-            Style::default().fg(th.text).add_modifier(Modifier::BOLD),
-        )),
-        Line::from(Span::styled(
-            "  Enter / d         Download selected",
-            Style::default().fg(th.dim),
-        )),
-        Line::from(Span::styled(
-            "  b                 Browse a folder's files (pick one to download)",
-            Style::default().fg(th.dim),
-        )),
-        Line::from(Span::styled(
-            "  Multiple files can download simultaneously",
-            Style::default().fg(th.dim),
-        )),
-        Line::from(Span::styled(
-            "  SHA256 is verified automatically on completion",
-            Style::default().fg(th.dim),
-        )),
-        Line::from(""),
-        Line::from(Span::styled(
-            " Sharing",
-            Style::default().fg(th.text).add_modifier(Modifier::BOLD),
-        )),
-        Line::from(Span::styled(
-            "  x / Del           Remove your share",
-            Style::default().fg(th.dim),
-        )),
-        Line::from(Span::styled(
-            "  Drag & drop file  Share it instantly",
-            Style::default().fg(th.dim),
-        )),
-        Line::from(Span::styled(
-            "  Drag & drop folder  → zip dialog",
-            Style::default().fg(th.dim),
-        )),
-        Line::from(Span::styled(
-            "  m (in My Shares)  Type a path manually",
-            Style::default().fg(th.dim),
-        )),
-        Line::from(""),
-        Line::from(""),
-        Line::from(Span::styled(
-            "  Transfers panel (Tab to focus)",
-            Style::default().fg(th.accent),
-        )),
-        Line::from(Span::styled(
-            "  ↕ / j/k            Select download",
-            Style::default().fg(th.dim),
-        )),
-        Line::from(Span::styled(
-            "  p / Space          Pause / resume",
-            Style::default().fg(th.dim),
-        )),
-        Line::from(Span::styled(
-            "  c / Delete         Cancel download",
-            Style::default().fg(th.dim),
-        )),
-        Line::from(""),
-        Line::from(Span::styled(
-            "  ?                 Toggle this help",
-            Style::default().fg(th.dim),
-        )),
-        Line::from(Span::styled(
-            "  r                 Show QR code for web UI",
-            Style::default().fg(th.dim),
-        )),
-        Line::from(Span::styled(
-            "  u                 Toggle speed unit (MB/s ↔ Mb/s)",
-            Style::default().fg(th.dim),
-        )),
-        Line::from(Span::styled(
-            "  t                 Cycle theme (Ocean/Dracula/Nord/Gruvbox/Matrix)",
-            Style::default().fg(th.dim),
-        )),
-        Line::from(Span::styled(
-            "  q / Ctrl+C        Quit",
-            Style::default().fg(th.dim),
-        )),
-    ];
 
     let block = Block::default()
         .borders(Borders::ALL)
         .border_style(Style::default().fg(th.accent))
         .style(Style::default().bg(th.overlay_bg));
 
-    let para = Paragraph::new(text).block(block).wrap(Wrap { trim: false });
+    let para = Paragraph::new(text).block(block);
     f.render_widget(para, popup);
+}
+
+/// Render a `key   description` shortcut row, word-wrapping the
+/// description to `total_width` with continuation lines indented to
+/// start at the description column (instead of the left edge).
+fn wrap_shortcut(key: &str, desc: &str, total_width: usize) -> Vec<String> {
+    let key_col = format!("  {:<width$}", key, width = HELP_KEY_COL);
+    // Use char count, not byte length: some keys contain multi-byte UTF-8
+    // arrows (↑↓←→), so `.len()` would overcount and misalign the indent.
+    let key_col_chars = key_col.chars().count();
+    let indent = " ".repeat(key_col_chars);
+    let desc_width = total_width.saturating_sub(key_col_chars).max(10);
+
+    let wrapped = wrap_words(desc, desc_width);
+    let mut out = Vec::with_capacity(wrapped.len().max(1));
+    for (i, line) in wrapped.iter().enumerate() {
+        if i == 0 {
+            out.push(format!("{}{}", key_col, line));
+        } else {
+            out.push(format!("{}{}", indent, line));
+        }
+    }
+    if out.is_empty() {
+        out.push(key_col.trim_end().to_string());
+    }
+    out
+}
+
+/// Greedy word-wrap: fits as many whole words per line as possible within
+/// `width` chars. Operates on chars (not bytes) so it's safe with the
+/// multi-byte arrows/symbols used in some descriptions. Words that are
+/// themselves longer than `width` (e.g. a long parenthesized list with no
+/// spaces) are hard-split so a single overlong token can never overflow
+/// the popup — this can leave an ugly mid-word break, but never a
+/// clipped/overflowing line.
+fn wrap_words(text: &str, width: usize) -> Vec<String> {
+    let width = width.max(1);
+    let mut lines = Vec::new();
+    let mut current = String::new();
+
+    for raw_word in text.split(' ') {
+        // A word may need hard-splitting into several chunks if it alone
+        // exceeds `width`; process each chunk as if it were its own word.
+        let mut remaining: Vec<char> = raw_word.chars().collect();
+        loop {
+            let extra = if current.is_empty() { 0 } else { 1 };
+            let fits_appended = current.chars().count() + extra + remaining.len() <= width;
+
+            if fits_appended {
+                if !current.is_empty() {
+                    current.push(' ');
+                }
+                current.extend(remaining.iter());
+                break;
+            }
+
+            if remaining.len() <= width {
+                // Doesn't fit on the current (non-empty) line, but would
+                // fit on a fresh one — wrap to a new line and retry.
+                if !current.is_empty() {
+                    lines.push(std::mem::take(&mut current));
+                }
+                continue;
+            }
+
+            // Doesn't even fit on an empty line — hard-split off `width`
+            // chars, flush the current line, and keep splitting the rest.
+            if !current.is_empty() {
+                lines.push(std::mem::take(&mut current));
+            }
+            let tail = remaining.split_off(width);
+            lines.push(remaining.into_iter().collect());
+            remaining = tail;
+        }
+    }
+    if !current.is_empty() {
+        lines.push(current);
+    }
+    lines
 }
 
 fn draw_manual_ip_overlay(f: &mut Frame, app: &App, th: &Theme, area: Rect) {
