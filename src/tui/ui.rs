@@ -3,6 +3,7 @@ use crate::tui::app::{
     App, BrowsingFolder, DownloadState, Focus, LogKind, SpeedUnit, Theme, UploadState,
     WebUploadState, ZipConfirmRequest,
 };
+#[cfg(not(target_os = "macos"))]
 use qrcode::QrCode;
 use ratatui::{
     layout::{Constraint, Direction, Layout, Rect},
@@ -53,8 +54,13 @@ pub fn draw(f: &mut Frame, app: &App) {
     if app.show_help {
         draw_help_overlay(f, th, area);
     }
+    #[cfg(not(target_os = "macos"))]
     if app.show_qr {
         draw_qr_overlay(f, app, th, area);
+    }
+    #[cfg(target_os = "macos")]
+    if app.show_qr {
+        draw_link_overlay(f, app, th, area);
     }
     if app.manual_ip_input.is_some() {
         draw_manual_ip_overlay(f, app, th, area);
@@ -71,6 +77,11 @@ pub fn draw(f: &mut Frame, app: &App) {
 }
 
 fn draw_title_bar(f: &mut Frame, app: &App, th: &Theme, area: Rect) {
+    #[cfg(not(target_os = "macos"))]
+    let connect_hint = "  r qr";
+    #[cfg(target_os = "macos")]
+    let connect_hint = "  r link";
+
     let title = Line::from(vec![
         Span::styled(
             " 📡 fileshare ",
@@ -89,6 +100,7 @@ fn draw_title_bar(f: &mut Frame, app: &App, th: &Theme, area: Rect) {
         Span::styled(format!(" {} ", th.name), Style::default().fg(th.accent)),
         Span::styled("? help", Style::default().fg(th.dim)),
         Span::styled("  r qr", Style::default().fg(th.dim)),
+        Span::styled(connect_hint, Style::default().fg(th.dim)),
     ]);
     let bar = Paragraph::new(title).style(Style::default().bg(th.bar_bg));
     f.render_widget(bar, area);
@@ -866,7 +878,10 @@ fn draw_status_bar(f: &mut Frame, app: &App, th: &Theme, area: Rect) {
     )];
     spans.extend(context_hints);
     spans.push(Span::styled("[?] help  ", Style::default().fg(th.dim)));
+    #[cfg(not(target_os = "macos"))]
     spans.push(Span::styled("[r] qr code  ", Style::default().fg(th.dim)));
+    #[cfg(target_os = "macos")]
+    spans.push(Span::styled("[r] copy link  ", Style::default().fg(th.dim)));
     spans.push(Span::styled(
         format!("[u] {}  ", app.speed_unit.label()),
         Style::default().fg(th.accent),
@@ -1395,6 +1410,7 @@ fn local_ipv4() -> String {
     "127.0.0.1".to_string()
 }
 
+#[cfg(not(target_os = "macos"))]
 fn draw_qr_overlay(f: &mut Frame, app: &App, th: &Theme, area: Rect) {
     let url = format!("https://{}:{}/", local_ipv4(), app.config.port);
 
@@ -1479,6 +1495,64 @@ fn draw_qr_overlay(f: &mut Frame, app: &App, th: &Theme, area: Rect) {
     let block = Block::default()
         .title(Span::styled(
             " 📱 QR Code ",
+            Style::default().fg(th.accent).add_modifier(Modifier::BOLD),
+        ))
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(th.accent))
+        .style(Style::default().bg(th.overlay_bg));
+
+    let para = Paragraph::new(lines)
+        .block(block)
+        .wrap(Wrap { trim: false });
+    f.render_widget(para, popup);
+}
+
+/// macOS-only alternative to the QR overlay. Terminal.app renders the
+/// half-block QR grid unreliably (glyph/color-pair alignment issues vary by
+/// font and profile), so instead of a QR code this just shows the web UI's
+/// URL as plain, easy-to-select text.
+#[cfg(target_os = "macos")]
+fn draw_link_overlay(f: &mut Frame, app: &App, th: &Theme, area: Rect) {
+    let url = format!("https://{}:{}/", local_ipv4(), app.config.port);
+
+    let lines = vec![
+        Line::from(""),
+        Line::from(Span::styled(
+            " Open the web UI at:",
+            Style::default().fg(th.text),
+        )),
+        Line::from(""),
+        Line::from(Span::styled(
+            format!(" {}", url),
+            Style::default().fg(th.accent).add_modifier(Modifier::BOLD),
+        )),
+        Line::from(""),
+        Line::from(Span::styled(
+            " (QR codes aren't shown on macOS \u{2014} Terminal.app doesn't",
+            Style::default().fg(th.dim),
+        )),
+        Line::from(Span::styled(
+            " render the code reliably. Copy the link instead.)",
+            Style::default().fg(th.dim),
+        )),
+        Line::from(""),
+        Line::from(Span::styled(
+            " [r / Esc] close ",
+            Style::default().fg(th.dim),
+        )),
+    ];
+
+    let popup_w = 62u16.min(area.width);
+    let popup_h = (lines.len() as u16 + 2).min(area.height);
+    let x = area.width.saturating_sub(popup_w) / 2;
+    let y = area.height.saturating_sub(popup_h) / 2;
+    let popup = Rect::new(x, y, popup_w, popup_h);
+
+    f.render_widget(Clear, popup);
+
+    let block = Block::default()
+        .title(Span::styled(
+            " \u{1F517} Web UI Link ",
             Style::default().fg(th.accent).add_modifier(Modifier::BOLD),
         ))
         .borders(Borders::ALL)

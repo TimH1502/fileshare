@@ -208,6 +208,17 @@ pub struct Theme {
 
 use ratatui::style::Color;
 
+// Two color sets exist because terminal emulators disagree on how "named"
+// ANSI colors (e.g. DarkGray) and near-black RGB backgrounds render. Windows
+// Terminal / ConHost render the original values fine. macOS's Terminal.app
+// (and some Linux terminal profiles) remap dim/bright-black colors much
+// closer to the background, and pack backgrounds close enough to true black
+// that they can visibly shimmer on redraw. The non-Windows set below keeps
+// each theme's original hue/character but raises every foreground color to
+// >=4.5:1 contrast against its background (WCAG AA text minimum) and spaces
+// background layers (bar/overlay/selection) further apart from black and
+// from each other, computed against sRGB relative luminance.
+#[cfg(target_family = "windows")]
 pub const THEMES: &[Theme] = &[
     // ── Ocean (default) ─────────────────────────────────────────────────────
     Theme {
@@ -288,6 +299,98 @@ pub const THEMES: &[Theme] = &[
         bar_bg: Color::Rgb(0, 15, 5),
         overlay_bg: Color::Rgb(0, 8, 3),
         text: Color::Rgb(180, 255, 200),
+    },
+];
+
+// ─────────────────────────────────────────────────────────────────────────
+// Non-Windows (macOS, Linux, etc.): every value below is explicit RGB (no
+// named ANSI colors, which some terminal profiles remap unpredictably) and
+// every foreground color measures >=4.5:1 contrast against both its theme's
+// bar_bg and pure black. Background layers (bar_bg/overlay_bg/selected_bg)
+// are also spaced apart from black and from each other by a real luminance
+// step, which is what actually stops near-black backgrounds from visibly
+// shimmering on redraw in some terminal renderers.
+#[cfg(not(target_family = "windows"))]
+pub const THEMES: &[Theme] = &[
+    // ── Ocean (default) ─────────────────────────────────────────────────────
+    Theme {
+        name: "Ocean",
+        accent: Color::Rgb(64, 220, 255),
+        dim: Color::Rgb(150, 165, 180),
+        success: Color::Rgb(90, 235, 140),
+        warn: Color::Rgb(255, 210, 80),
+        error: Color::Rgb(255, 110, 110),
+        download: Color::Rgb(225, 130, 255),
+        upload: Color::Rgb(255, 180, 80),
+        web_upload: Color::Rgb(130, 215, 255),
+        selected_bg: Color::Rgb(40, 68, 84),
+        bar_bg: Color::Rgb(22, 32, 44),
+        overlay_bg: Color::Rgb(14, 20, 30),
+        text: Color::Rgb(235, 240, 245),
+    },
+    // ── Dracula ─────────────────────────────────────────────────────────────
+    Theme {
+        name: "Dracula",
+        accent: Color::Rgb(198, 157, 255),
+        dim: Color::Rgb(155, 170, 215),
+        success: Color::Rgb(120, 255, 160),
+        warn: Color::Rgb(255, 195, 130),
+        error: Color::Rgb(255, 120, 120),
+        download: Color::Rgb(255, 150, 210),
+        upload: Color::Rgb(255, 195, 130),
+        web_upload: Color::Rgb(160, 240, 255),
+        selected_bg: Color::Rgb(80, 84, 108),
+        bar_bg: Color::Rgb(44, 46, 60),
+        overlay_bg: Color::Rgb(28, 28, 38),
+        text: Color::Rgb(248, 248, 242),
+    },
+    // ── Nord ────────────────────────────────────────────────────────────────
+    Theme {
+        name: "Nord",
+        accent: Color::Rgb(160, 210, 225),
+        dim: Color::Rgb(160, 175, 195),
+        success: Color::Rgb(185, 210, 160),
+        warn: Color::Rgb(240, 208, 145),
+        error: Color::Rgb(232, 140, 148),
+        download: Color::Rgb(205, 170, 200),
+        upload: Color::Rgb(225, 160, 135),
+        web_upload: Color::Rgb(170, 210, 209),
+        selected_bg: Color::Rgb(70, 79, 98),
+        bar_bg: Color::Rgb(48, 54, 67),
+        overlay_bg: Color::Rgb(34, 38, 48),
+        text: Color::Rgb(233, 237, 244),
+    },
+    // ── Gruvbox ─────────────────────────────────────────────────────────────
+    Theme {
+        name: "Gruvbox",
+        accent: Color::Rgb(250, 189, 47),
+        dim: Color::Rgb(178, 163, 142),
+        success: Color::Rgb(195, 190, 50),
+        warn: Color::Rgb(250, 189, 47),
+        error: Color::Rgb(255, 110, 90),
+        download: Color::Rgb(222, 145, 166),
+        upload: Color::Rgb(254, 140, 45),
+        web_upload: Color::Rgb(155, 205, 137),
+        selected_bg: Color::Rgb(96, 88, 82),
+        bar_bg: Color::Rgb(56, 50, 44),
+        overlay_bg: Color::Rgb(38, 34, 30),
+        text: Color::Rgb(251, 241, 199),
+    },
+    // ── Matrix ──────────────────────────────────────────────────────────────
+    Theme {
+        name: "Matrix",
+        accent: Color::Rgb(70, 255, 130),
+        dim: Color::Rgb(85, 180, 105),
+        success: Color::Rgb(70, 255, 130),
+        warn: Color::Rgb(200, 255, 80),
+        error: Color::Rgb(255, 110, 110),
+        download: Color::Rgb(70, 230, 140),
+        upload: Color::Rgb(150, 255, 185),
+        web_upload: Color::Rgb(70, 240, 200),
+        selected_bg: Color::Rgb(12, 60, 29),
+        bar_bg: Color::Rgb(6, 28, 13),
+        overlay_bg: Color::Rgb(3, 15, 7),
+        text: Color::Rgb(195, 255, 210),
     },
 ];
 
