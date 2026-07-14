@@ -23,6 +23,8 @@ codegen-units = 1      # single unit = better inlining, smaller binary
 strip = "symbols"      # drop debug symbols → noticeably smaller .exe/.bin
 panic = "abort"        # no unwinding machinery → smaller binary
 
+[build-dependencies]
+winres = "0.1"
 
 [dependencies]
 # Async runtime

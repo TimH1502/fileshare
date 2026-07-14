@@ -4,3 +4,6 @@ Cargo.lock
 
 # MacOs finder files
 .DS_Store
+
+# icon files for windows
+resource.rc
